@@ -1,0 +1,766 @@
+from __future__ import annotations
+
+import json
+import os
+import zipfile
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Callable
+
+import requests
+
+from analysis.mobsf import DEFAULT_MOBSF_URL, normalize_base_url
+from analysis.mobsf.client import MobSFClient, MobSFClientError, MobSFResponse
+from analysis.models.mobsf import (
+    MobSFArtifacts,
+    MobSFDynamicAndroidSummary,
+    MobSFFeatureFlags,
+    MobSFInstanceInfo,
+    MobSFIosSummary,
+    MobSFAppSecFinding,
+    MobSFReport,
+    MobSFStaticSummary,
+)
+from analysis.reporting import ReportManager
+from analysis.settings import load_settings
+from analysis.stages import STAGE_CROSS_TOOL
+from analysis.storage import Storage
+from models import Run
+
+
+@dataclass
+class Stage3Config:
+    enable_dynamic_android: bool = False
+    enable_ios: bool = False
+    cleanup_scans: bool = False
+    download_pdf: bool = False
+    view_source: bool = False
+    frida_steps: bool = False
+    tls_tests: bool = False
+    view_source_files: list[tuple[str, str]] = field(default_factory=list)
+    dynamic_view_source_files: list[tuple[str, str]] = field(default_factory=list)
+    frida_default_hooks: str = "api_monitor"
+    frida_auxiliary_hooks: str = ""
+    frida_code: str = ""
+
+
+class Stage3MobSFRunner:
+    def __init__(
+        self,
+        storage: Storage,
+        config: Stage3Config | None = None,
+        on_progress: Callable[[str], None] | None = None,
+    ) -> None:
+        self.storage = storage
+        self.config = config or Stage3Config()
+        self.on_progress = on_progress
+
+    def run(self, project_id: str) -> Run:
+        run, run_dir = self.storage.create_run(project_id, STAGE_CROSS_TOOL)
+        log_path = run_dir / "logs" / "stage3_mobsf.txt"
+        log = self._build_logger(log_path)
+        artifacts_root = run_dir / "artifacts" / "mobsf"
+        static_dir = artifacts_root / "static"
+        dynamic_dir = artifacts_root / "dynamic_android"
+        ios_dir = artifacts_root / "ios"
+        trace_dir = artifacts_root / "http_trace"
+        for path in (static_dir, dynamic_dir, ios_dir, trace_dir):
+            path.mkdir(parents=True, exist_ok=True)
+
+        start_time = datetime.now().isoformat(timespec="seconds")
+        log("Stage3 MobSF run started.")
+        self._emit("Starting MobSF Stage3 analysis...")
+
+        try:
+            base_url, api_key = self._resolve_mobsf_settings()
+            client = MobSFClient(base_url, api_key)
+
+            self._emit("Checking MobSF availability...")
+            self._check_available(client)
+
+            apk_path = Path(run.apk_path)
+            if not apk_path.exists():
+                raise RuntimeError(f"APK not found: {apk_path}")
+            if apk_path.stat().st_size == 0:
+                raise RuntimeError(f"APK is empty: {apk_path}")
+            apk_display_name = self._resolve_apk_display_name(project_id, apk_path)
+            self._validate_upload_file(apk_path, apk_display_name, log)
+
+            static_summary, dynamic_summary, ios_summary, artifacts = self._run_pipeline(
+                client,
+                run_dir,
+                apk_path,
+                apk_display_name,
+                static_dir,
+                dynamic_dir,
+                ios_dir,
+                trace_dir,
+                log,
+            )
+
+            run.status = "Done"
+            run.finished_at = datetime.now().isoformat(timespec="seconds")
+
+            report = self._build_report(
+                run,
+                run_dir,
+                base_url,
+                start_time,
+                static_summary,
+                dynamic_summary,
+                ios_summary,
+                artifacts,
+            )
+
+            report_manager = ReportManager(self.storage)
+            json_path, html_path = report_manager.generate_stage3(run, run_dir, report)
+            run.report_path = str(html_path)
+            self.storage.save_run(run, run_dir)
+            log("Stage3 MobSF run completed.")
+            return run
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            log(f"Stage3 MobSF run failed: {exc}")
+            run.status = "Error"
+            run.finished_at = datetime.now().isoformat(timespec="seconds")
+            run.errors.append(f"Stage3 MobSF failed: {exc}")
+            report = self._build_error_report(run, run_dir, start_time, str(exc))
+            report_manager = ReportManager(self.storage)
+            report_manager.generate_stage3(run, run_dir, report)
+            self.storage.save_run(run, run_dir)
+            raise
+
+    def _run_pipeline(
+        self,
+        client: MobSFClient,
+        run_dir: Path,
+        apk_path: Path,
+        apk_display_name: str,
+        static_dir: Path,
+        dynamic_dir: Path,
+        _ios_dir: Path,
+        trace_dir: Path,
+        log: Callable[[str], None],
+    ) -> tuple[MobSFStaticSummary, MobSFDynamicAndroidSummary, MobSFIosSummary, MobSFArtifacts]:
+        artifacts = MobSFArtifacts()
+        static_summary = MobSFStaticSummary()
+        dynamic_summary = MobSFDynamicAndroidSummary(enabled=self.config.enable_dynamic_android)
+        ios_summary = MobSFIosSummary(enabled=self.config.enable_ios, status="Not configured")
+
+        self._emit("Uploading APK to MobSF...")
+        upload_resp = self._call_and_save_json(
+            lambda: client.upload(str(apk_path), filename=apk_display_name),
+            static_dir / "upload.json",
+            trace_dir,
+            "static_upload",
+        )
+        upload_data = upload_resp.json_data or {}
+        scan_hash = upload_data.get("hash")
+        scan_type = upload_data.get("scan_type")
+        static_summary.scan_hash = scan_hash
+        static_summary.scan_type = scan_type
+        artifacts.static["upload"] = self._relpath(run_dir, static_dir / "upload.json")
+
+        if not scan_hash:
+            raise RuntimeError("MobSF upload did not return a scan hash.")
+
+        self._emit("Starting MobSF static scan...")
+        self._emit_scan_status("Scan started")
+        self._call_and_save_json(
+            lambda: client.scan(scan_hash),
+            static_dir / "scan.json",
+            trace_dir,
+            "static_scan",
+        )
+        artifacts.static["scan"] = self._relpath(run_dir, static_dir / "scan.json")
+
+        self._emit("Fetching MobSF scan logs...")
+        scan_logs_resp = self._call_and_save_text(
+            lambda: client.scan_logs(scan_hash),
+            static_dir / "scan_logs.txt",
+            trace_dir,
+            "static_scan_logs",
+        )
+        scan_status = self._scan_status_from_logs(scan_logs_resp.json_data)
+        if scan_status:
+            self._emit_scan_status(scan_status)
+        artifacts.static["scan_logs"] = self._relpath(run_dir, static_dir / "scan_logs.txt")
+
+        self._emit("Fetching MobSF static report JSON...")
+        report_resp = self._call_and_save_json(
+            lambda: client.report_json(scan_hash),
+            static_dir / "report.json",
+            trace_dir,
+            "static_report_json",
+        )
+        artifacts.static["report_json"] = self._relpath(run_dir, static_dir / "report.json")
+        static_summary = self._extract_static_summary(report_resp.json_data, static_summary)
+        self._emit_scan_status("Scan completed")
+
+        self._emit("Fetching MobSF scorecard...")
+        scorecard_resp = self._call_and_save_json(
+            lambda: client.scorecard(scan_hash),
+            static_dir / "scorecard.json",
+            trace_dir,
+            "static_scorecard",
+        )
+        artifacts.static["scorecard"] = self._relpath(run_dir, static_dir / "scorecard.json")
+        static_summary.scorecard = scorecard_resp.json_data or {}
+
+        if self.config.download_pdf:
+            self._emit("Downloading MobSF PDF report...")
+            pdf_path = static_dir / "report.pdf"
+            pdf_response = client.download_pdf(scan_hash)
+            self._write_trace(trace_dir, "static_download_pdf", pdf_response.status_code)
+            if pdf_response.status_code >= 400:
+                snippet = self._short_text(pdf_response.text)
+                raise MobSFClientError(
+                    f"MobSF API error (HTTP {pdf_response.status_code}) during PDF download: {snippet}"
+                )
+            self._write_binary(pdf_path, pdf_response.content)
+            artifacts.static["report_pdf"] = self._relpath(run_dir, pdf_path)
+
+        if self.config.view_source and self.config.view_source_files:
+            view_dir = static_dir / "view_source"
+            view_dir.mkdir(parents=True, exist_ok=True)
+            for file_path, source_type in self.config.view_source_files:
+                self._emit(f"Fetching source: {file_path}")
+                self._call_and_save_json(
+                    lambda fp=file_path, st=source_type: client.view_source(scan_hash, fp, st),
+                    view_dir / f"{self._safe_name(file_path)}.json",
+                    trace_dir,
+                    f"static_view_source_{self._safe_name(file_path)}",
+                )
+            artifacts.static["view_source"] = self._relpath(run_dir, view_dir)
+        elif self.config.view_source:
+            log("View source enabled but no files configured.")
+
+        if self.config.enable_dynamic_android:
+            dynamic_summary, dynamic_artifacts = self._run_dynamic_android(
+                client,
+                scan_hash,
+                dynamic_dir,
+                trace_dir,
+                log,
+                run_dir,
+                dynamic_summary,
+            )
+            artifacts.dynamic_android.update(dynamic_artifacts)
+
+        if self.config.cleanup_scans:
+            self._emit("Cleaning up MobSF scan...")
+            self._call_and_save_json(
+                lambda: client.delete_scan(scan_hash),
+                static_dir / "delete_scan.json",
+                trace_dir,
+                "static_delete_scan",
+            )
+            artifacts.static["delete_scan"] = self._relpath(run_dir, static_dir / "delete_scan.json")
+
+        return static_summary, dynamic_summary, ios_summary, artifacts
+
+    def _run_dynamic_android(
+        self,
+        client: MobSFClient,
+        scan_hash: str,
+        dynamic_dir: Path,
+        trace_dir: Path,
+        log: Callable[[str], None],
+        run_dir: Path,
+        summary: MobSFDynamicAndroidSummary,
+    ) -> tuple[MobSFDynamicAndroidSummary, dict[str, str]]:
+        artifacts: dict[str, str] = {}
+        self._emit("Starting MobSF dynamic analysis...")
+        start_resp = self._call_and_save_json(
+            lambda: client.dynamic_start_analysis(scan_hash),
+            dynamic_dir / "start.json",
+            trace_dir,
+            "dynamic_start",
+        )
+        summary.status = "running"
+        artifacts["start"] = self._relpath(run_dir, dynamic_dir / "start.json")
+
+        package_name = None
+        if isinstance(start_resp.json_data, dict):
+            package_name = start_resp.json_data.get("package")
+
+        if package_name:
+            self._emit("Collecting logcat...")
+            self._call_and_save_text(
+                lambda: client.android_logcat(package_name),
+                dynamic_dir / "logcat.txt",
+                trace_dir,
+                "dynamic_logcat",
+            )
+            summary.logcat_lines = self._line_count(dynamic_dir / "logcat.txt")
+            artifacts["logcat"] = self._relpath(run_dir, dynamic_dir / "logcat.txt")
+
+        if self.config.tls_tests:
+            self._emit("Running TLS tests...")
+            tls_resp = self._call_and_save_json(
+                lambda: client.android_tls_tests(scan_hash),
+                dynamic_dir / "tls_tests.json",
+                trace_dir,
+                "dynamic_tls_tests",
+            )
+            if isinstance(tls_resp.json_data, dict):
+                summary.tls_tests = tls_resp.json_data.get("tls_tests", tls_resp.json_data)
+            artifacts["tls_tests"] = self._relpath(run_dir, dynamic_dir / "tls_tests.json")
+
+        if self.config.frida_steps:
+            frida_dir = dynamic_dir / "frida"
+            frida_dir.mkdir(parents=True, exist_ok=True)
+            self._emit("Starting Frida instrumentation...")
+            self._call_and_save_json(
+                lambda: client.frida_instrument(
+                    scan_hash,
+                    self.config.frida_default_hooks,
+                    self.config.frida_auxiliary_hooks,
+                    self.config.frida_code,
+                ),
+                frida_dir / "instrument.json",
+                trace_dir,
+                "dynamic_frida_instrument",
+            )
+            self._emit("Collecting Frida API monitor...")
+            self._call_and_save_json(
+                lambda: client.frida_api_monitor(scan_hash),
+                frida_dir / "api_monitor.json",
+                trace_dir,
+                "dynamic_frida_api_monitor",
+            )
+            self._emit("Collecting Frida logs...")
+            self._call_and_save_json(
+                lambda: client.frida_logs(scan_hash),
+                frida_dir / "logs.json",
+                trace_dir,
+                "dynamic_frida_logs",
+            )
+            artifacts["frida"] = self._relpath(run_dir, frida_dir)
+
+        self._emit("Stopping dynamic analysis...")
+        self._call_and_save_json(
+            lambda: client.dynamic_stop_analysis(scan_hash),
+            dynamic_dir / "stop.json",
+            trace_dir,
+            "dynamic_stop",
+        )
+        summary.status = "stopped"
+        artifacts["stop"] = self._relpath(run_dir, dynamic_dir / "stop.json")
+
+        self._emit("Fetching dynamic report JSON...")
+        self._call_and_save_json(
+            lambda: client.dynamic_report_json(scan_hash),
+            dynamic_dir / "report.json",
+            trace_dir,
+            "dynamic_report_json",
+        )
+        artifacts["report_json"] = self._relpath(run_dir, dynamic_dir / "report.json")
+
+        if self.config.dynamic_view_source_files:
+            view_dir = dynamic_dir / "view_source"
+            view_dir.mkdir(parents=True, exist_ok=True)
+            for file_path, file_type in self.config.dynamic_view_source_files:
+                self._emit(f"Fetching dynamic source: {file_path}")
+                self._call_and_save_json(
+                    lambda fp=file_path, ft=file_type: client.dynamic_view_source(scan_hash, fp, ft),
+                    view_dir / f"{self._safe_name(file_path)}.json",
+                    trace_dir,
+                    f"dynamic_view_source_{self._safe_name(file_path)}",
+                )
+            artifacts["view_source"] = self._relpath(run_dir, view_dir)
+
+        return summary, artifacts
+
+    def _build_report(
+        self,
+        run: Run,
+        run_dir: Path,
+        base_url: str,
+        started_at: str,
+        static_summary: MobSFStaticSummary,
+        dynamic_summary: MobSFDynamicAndroidSummary,
+        ios_summary: MobSFIosSummary,
+        artifacts: MobSFArtifacts,
+    ) -> MobSFReport:
+        instance = MobSFInstanceInfo(
+            base_url=base_url,
+            started_at=started_at,
+            finished_at=datetime.now().isoformat(timespec="seconds"),
+        )
+        features = MobSFFeatureFlags(
+            enable_dynamic_android=self.config.enable_dynamic_android,
+            enable_ios=self.config.enable_ios,
+            cleanup_scans=self.config.cleanup_scans,
+            download_pdf=self.config.download_pdf,
+            view_source=self.config.view_source,
+            frida_steps=self.config.frida_steps,
+            tls_tests=self.config.tls_tests,
+        )
+        return MobSFReport(
+            instance=instance,
+            features=features,
+            artifacts=artifacts,
+            static=static_summary,
+            dynamic_android=dynamic_summary,
+            ios=ios_summary,
+        )
+
+    def _build_error_report(self, run: Run, run_dir: Path, started_at: str, error: str) -> MobSFReport:
+        instance = MobSFInstanceInfo(
+            base_url=normalize_base_url(DEFAULT_MOBSF_URL),
+            started_at=started_at,
+            finished_at=datetime.now().isoformat(timespec="seconds"),
+        )
+        features = MobSFFeatureFlags(
+            enable_dynamic_android=self.config.enable_dynamic_android,
+            enable_ios=self.config.enable_ios,
+            cleanup_scans=self.config.cleanup_scans,
+            download_pdf=self.config.download_pdf,
+            view_source=self.config.view_source,
+            frida_steps=self.config.frida_steps,
+            tls_tests=self.config.tls_tests,
+        )
+        static_summary = MobSFStaticSummary()
+        dynamic_summary = MobSFDynamicAndroidSummary(enabled=self.config.enable_dynamic_android)
+        ios_summary = MobSFIosSummary(enabled=self.config.enable_ios, status="Not configured")
+        artifacts = MobSFArtifacts()
+        return MobSFReport(
+            instance=instance,
+            features=features,
+            artifacts=artifacts,
+            static=static_summary,
+            dynamic_android=dynamic_summary,
+            ios=ios_summary,
+        )
+
+    def _check_available(self, client: MobSFClient) -> None:
+        try:
+            response = client.scans(page=1, page_size=1)
+        except requests.RequestException as exc:
+            raise MobSFClientError(f"MobSF is not reachable: {exc}") from exc
+        if response.status_code >= 400:
+            snippet = self._short_text(response.text)
+            raise MobSFClientError(
+                f"MobSF is not available (HTTP {response.status_code}): {snippet}",
+                response=response,
+            )
+
+    def _resolve_mobsf_settings(self) -> tuple[str, str]:
+        settings = load_settings()
+        mobsf = settings.get("mobsf", {})
+        base_url = normalize_base_url(mobsf.get("url", DEFAULT_MOBSF_URL))
+        api_key = os.environ.get("MOBSF_API_KEY") or mobsf.get("api_key")
+        if not api_key:
+            raise RuntimeError("MobSF API key is not configured (MOBSF_API_KEY).")
+        return base_url, api_key
+
+    def _resolve_apk_display_name(self, project_id: str, apk_path: Path) -> str:
+        try:
+            project = self.storage.load_project(project_id)
+        except (FileNotFoundError, ValueError, json.JSONDecodeError, OSError):
+            return apk_path.name
+        if project.apk_meta and project.apk_meta.name:
+            return project.apk_meta.name
+        return apk_path.name
+
+    def _validate_upload_file(
+        self, apk_path: Path, display_name: str, log: Callable[[str], None]
+    ) -> None:
+        supported_ext = {".apk", ".zip", ".ipa", ".appx"}
+        ext = Path(display_name).suffix.lower()
+        if ext not in supported_ext:
+            raise RuntimeError(
+                "MobSF upload supports .apk, .zip, .ipa, .appx files. "
+                f"Got: {display_name}"
+            )
+        if not zipfile.is_zipfile(apk_path):
+            raise RuntimeError(f"File is not a valid archive: {apk_path}")
+        size = apk_path.stat().st_size
+        log(f"Uploading {display_name} ({size} bytes).")
+
+    def _call_and_save_json(
+        self,
+        func: Callable[[], MobSFResponse],
+        path: Path,
+        trace_dir: Path,
+        trace_name: str,
+    ) -> MobSFResponse:
+        try:
+            response = func()
+        except requests.RequestException as exc:
+            self._write_trace(trace_dir, trace_name, 0, note=str(exc))
+            raise MobSFClientError(f"MobSF request failed: {exc}") from exc
+        self._write_trace(trace_dir, trace_name, response.status_code, response.text)
+        self._write_text(path, response.text)
+        if response.status_code >= 400:
+            snippet = self._short_text(response.text)
+            raise MobSFClientError(
+                f"MobSF API error (HTTP {response.status_code}): {snippet}",
+                response=response,
+            )
+        return response
+
+    def _call_and_save_text(
+        self,
+        func: Callable[[], MobSFResponse],
+        path: Path,
+        trace_dir: Path,
+        trace_name: str,
+    ) -> MobSFResponse:
+        try:
+            response = func()
+        except requests.RequestException as exc:
+            self._write_trace(trace_dir, trace_name, 0, note=str(exc))
+            raise MobSFClientError(f"MobSF request failed: {exc}") from exc
+        self._write_trace(trace_dir, trace_name, response.status_code, response.text)
+        self._write_text(path, response.text)
+        if response.status_code >= 400:
+            snippet = self._short_text(response.text)
+            raise MobSFClientError(
+                f"MobSF API error (HTTP {response.status_code}): {snippet}",
+                response=response,
+            )
+        return response
+
+    def _short_text(self, text: str | None, limit: int = 300) -> str:
+        if not text:
+            return "-"
+        cleaned = " ".join(text.split())
+        if len(cleaned) <= limit:
+            return cleaned
+        return cleaned[:limit] + "..."
+
+    def _write_trace(
+        self,
+        trace_dir: Path,
+        name: str,
+        status_code: int,
+        body: str | None = None,
+        note: str | None = None,
+    ) -> None:
+        payload = {"status": status_code}
+        if note:
+            payload["note"] = note
+        if body is not None:
+            payload["body"] = body
+        trace_path = trace_dir / f"{name}.json"
+        trace_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def _write_text(self, path: Path, text: str | None) -> None:
+        path.write_text(text or "", encoding="utf-8")
+
+    def _write_binary(self, path: Path, content: bytes) -> None:
+        path.write_bytes(content)
+
+    def _build_logger(self, path: Path) -> Callable[[str], None]:
+        def _log(message: str) -> None:
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            line = f"[{timestamp}] {message}"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+            if self.on_progress:
+                self.on_progress(line)
+
+        return _log
+
+    def _emit(self, message: str) -> None:
+        if self.on_progress:
+            self.on_progress(message)
+
+    def _emit_scan_status(self, status: str) -> None:
+        if not self.on_progress:
+            return
+        self.on_progress(f"MOBSF_SCAN_STATUS:{status}")
+
+    def _line_count(self, path: Path) -> int | None:
+        if not path.exists():
+            return None
+        return sum(1 for _ in path.open("r", encoding="utf-8", errors="replace"))
+
+    def _scan_status_from_logs(self, payload: object) -> str | None:
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except json.JSONDecodeError:
+                return None
+        if not isinstance(payload, dict):
+            return None
+        logs = payload.get("logs")
+        if not isinstance(logs, list):
+            return None
+        for entry in reversed(logs):
+            if isinstance(entry, dict):
+                status = entry.get("status")
+                if isinstance(status, str) and status.strip():
+                    return status.strip()
+        return None
+
+    def _parse_appsec_findings(
+        self,
+        items: object,
+        severity: str,
+    ) -> list[MobSFAppSecFinding]:
+        if not isinstance(items, list):
+            return []
+        findings = []
+        for entry in items:
+            if not isinstance(entry, dict):
+                continue
+            title = entry.get("title")
+            if not isinstance(title, str):
+                continue
+            description = entry.get("description")
+            if description is not None and not isinstance(description, str):
+                description = str(description)
+            section = entry.get("section")
+            if section is not None and not isinstance(section, str):
+                section = str(section)
+            findings.append(
+                MobSFAppSecFinding(
+                    title=title,
+                    description=description,
+                    section=section,
+                    severity=severity,
+                )
+            )
+        return findings
+
+    def _extract_static_summary(
+        self,
+        report_json: dict | list | None,
+        summary: MobSFStaticSummary,
+    ) -> MobSFStaticSummary:
+        if isinstance(report_json, dict):
+            summary.app_name = report_json.get("app_name") or summary.app_name
+            summary.package_name = report_json.get("package_name") or summary.package_name
+            summary.version_name = report_json.get("version_name") or summary.version_name
+            version_code = report_json.get("version_code")
+            if version_code is not None:
+                summary.version_code = str(version_code)
+            min_sdk = report_json.get("min_sdk")
+            if min_sdk is not None:
+                summary.min_sdk = str(min_sdk)
+            target_sdk = report_json.get("target_sdk")
+            if target_sdk is not None:
+                summary.target_sdk = str(target_sdk)
+
+            findings = report_json.get("findings")
+            if isinstance(findings, list):
+                summary.findings_total = len(findings)
+            issues = report_json.get("issues")
+            if isinstance(issues, dict):
+                summary.issues = {str(k): int(v) for k, v in issues.items() if isinstance(v, int)}
+            permissions = report_json.get("permissions")
+            if isinstance(permissions, dict):
+                permission_list = list(permissions.keys())
+                summary.permissions_total = len(permission_list)
+                summary.permissions_top = permission_list[:10]
+
+            exported = report_json.get("exported_activities")
+            if isinstance(exported, list):
+                summary.exported_total = len(exported)
+                summary.exported_top = exported[:10]
+            elif isinstance(report_json.get("exported_count"), int):
+                summary.exported_total = int(report_json["exported_count"])
+
+            urls = report_json.get("urls")
+            if isinstance(urls, list):
+                url_values: list[str] = []
+                seen: set[str] = set()
+                for entry in urls:
+                    if isinstance(entry, dict):
+                        entries = entry.get("urls")
+                        if isinstance(entries, list):
+                            for value in entries:
+                                if isinstance(value, str) and value not in seen:
+                                    seen.add(value)
+                                    url_values.append(value)
+                    elif isinstance(entry, str) and entry not in seen:
+                        seen.add(entry)
+                        url_values.append(entry)
+                summary.urls_total = len(seen) if seen else len(urls)
+                summary.urls_top = url_values[:10]
+
+            domains = report_json.get("domains")
+            if isinstance(domains, dict):
+                domain_list = list(domains.keys())
+                summary.domains_total = len(domain_list)
+                summary.domains_top = domain_list[:10]
+
+            trackers = report_json.get("trackers")
+            if isinstance(trackers, dict):
+                detected = trackers.get("detected_trackers")
+                total = trackers.get("total_trackers")
+                items = trackers.get("trackers")
+                if isinstance(detected, int):
+                    summary.trackers_detected = detected
+                if isinstance(total, int):
+                    summary.trackers_total = total
+                if isinstance(items, list):
+                    tracker_list = [item for item in items if isinstance(item, str)]
+                    summary.trackers_top = tracker_list[:10]
+
+            secrets = report_json.get("secrets")
+            if isinstance(secrets, list):
+                summary.secrets_total = len(secrets)
+
+            appsec = report_json.get("appsec")
+            if isinstance(appsec, dict):
+                score = appsec.get("security_score")
+                if isinstance(score, (int, float)):
+                    summary.security_score = int(score)
+                appsec_summary: dict[str, int] = {}
+                crypto_total = 0
+                for key in ("high", "warning", "info", "secure", "hotspot"):
+                    items = appsec.get(key)
+                    if isinstance(items, list):
+                        appsec_summary[key] = len(items)
+                        for entry in items:
+                            if isinstance(entry, dict) and entry.get("section") == "crypto":
+                                crypto_total += 1
+                summary.appsec_summary = appsec_summary
+                summary.crypto_total = crypto_total or summary.crypto_total
+                summary.appsec_high = self._parse_appsec_findings(appsec.get("high"), "high")
+                summary.appsec_warning = self._parse_appsec_findings(appsec.get("warning"), "warning")
+                summary.appsec_info = self._parse_appsec_findings(appsec.get("info"), "info")
+                summary.appsec_secure = self._parse_appsec_findings(appsec.get("secure"), "secure")
+                summary.appsec_hotspot = self._parse_appsec_findings(appsec.get("hotspot"), "hotspot")
+                if isinstance(appsec.get("total_trackers"), int):
+                    summary.trackers_total = appsec.get("total_trackers")
+                if isinstance(appsec.get("trackers"), int):
+                    summary.trackers_detected = appsec.get("trackers")
+
+            manifest_summary = report_json.get("manifest_analysis", {}).get("manifest_summary")
+            if isinstance(manifest_summary, dict):
+                summary.manifest_summary = {
+                    str(k): int(v) for k, v in manifest_summary.items() if isinstance(v, int)
+                }
+
+            code_summary = report_json.get("code_analysis", {}).get("summary")
+            if isinstance(code_summary, dict):
+                summary.code_summary = {str(k): int(v) for k, v in code_summary.items() if isinstance(v, int)}
+
+            top_sections: dict[str, list[str]] = {}
+            if summary.permissions_top:
+                top_sections["permissions"] = summary.permissions_top
+            if summary.exported_top:
+                top_sections["exported_activities"] = summary.exported_top
+            if summary.urls_top:
+                top_sections["urls"] = summary.urls_top
+            if summary.domains_top:
+                top_sections["domains"] = summary.domains_top
+            if summary.trackers_top:
+                top_sections["trackers"] = summary.trackers_top
+            summary.top_sections = top_sections
+        return summary
+
+    def _safe_name(self, value: str) -> str:
+        return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in value).strip("_")
+
+    def _relpath(self, run_dir: Path, path: Path) -> str:
+        try:
+            return str(path.relative_to(run_dir))
+        except ValueError:
+            return str(path)

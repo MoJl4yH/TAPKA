@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from models.finding import Finding
+from analysis.models.mobsf import MobSFReport
 
 ReportStatus = Literal["ok", "partial", "fail", "not_implemented"]
 
@@ -64,6 +65,7 @@ class Stage2ReportModel(BaseReportModel):
 
 
 class Stage3ReportModel(BaseReportModel):
+    mobsf: MobSFReport | None = None
     status: ReportStatus = "not_implemented"
 
 

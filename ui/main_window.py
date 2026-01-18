@@ -40,8 +40,11 @@ from PySide6.QtWidgets import (
 )
 
 from analysis.storage import Storage
-from analysis.stages import STAGES, STAGE_OVERALL, STAGE_STATIC
+from analysis.settings import load_settings, save_settings
+from analysis.stages import STAGES, STAGE_CROSS_TOOL, STAGE_OVERALL, STAGE_STATIC
 from analysis.stage1_analysis import Stage1StaticRunner
+from analysis.mobsf import DEFAULT_MOBSF_URL, ensure_mobsf_ready, normalize_base_url, stop_mobsf
+from analysis.mobsf.stage3_runner import Stage3Config, Stage3MobSFRunner
 from analysis.reporting import ReportManager
 from models import Project, Run, CommandResult
 from ui.style import get_style
@@ -59,6 +62,57 @@ class Stage1Worker(QThread):
 
     def run(self) -> None:
         runner = Stage1StaticRunner(self.storage, on_progress=self.progress.emit)
+        try:
+            run = runner.run(self.project_id)
+            self.finished.emit(run)
+        except Exception:  # pylint: disable=broad-exception-caught
+            self.failed.emit(traceback.format_exc())
+
+
+class MobSFSetupWorker(QThread):
+    finished = Signal(object)
+    failed = Signal(str)
+    progress = Signal(str)
+
+    def __init__(self, base_url: str, api_key: str | None):
+        super().__init__()
+        self.base_url = base_url
+        self.api_key = api_key
+
+    def run(self) -> None:
+        try:
+            result = ensure_mobsf_ready(self.base_url, api_key=self.api_key, log=self.progress.emit)
+            self.finished.emit(result)
+        except Exception:  # pylint: disable=broad-exception-caught
+            self.failed.emit(traceback.format_exc())
+
+
+class MobSFStopWorker(QThread):
+    finished = Signal(bool)
+    failed = Signal(str)
+    progress = Signal(str)
+
+    def run(self) -> None:
+        try:
+            stopped = stop_mobsf(log=self.progress.emit)
+            self.finished.emit(stopped)
+        except Exception:  # pylint: disable=broad-exception-caught
+            self.failed.emit(traceback.format_exc())
+
+
+class Stage3Worker(QThread):
+    finished = Signal(object)
+    failed = Signal(str)
+    progress = Signal(str)
+
+    def __init__(self, storage: Storage, project_id: str, config: Stage3Config):
+        super().__init__()
+        self.storage = storage
+        self.project_id = project_id
+        self.config = config
+
+    def run(self) -> None:
+        runner = Stage3MobSFRunner(self.storage, config=self.config, on_progress=self.progress.emit)
         try:
             run = runner.run(self.project_id)
             self.finished.emit(run)
@@ -166,6 +220,22 @@ class MainWindow(QMainWindow):
         self.artifacts_open_button: QPushButton | None = None
         self.artifacts_reveal_button: QPushButton | None = None
         self.artifacts_table: QTableWidget | None = None
+        self.mobsf_worker: MobSFSetupWorker | None = None
+        self.mobsf_stop_worker: MobSFStopWorker | None = None
+        self.mobsf_run_worker: Stage3Worker | None = None
+        self.mobsf_setup_in_progress = False
+        self.mobsf_run_in_progress = False
+        self.mobsf_base_url = DEFAULT_MOBSF_URL
+        self.mobsf_api_key: str | None = None
+        self.mobsf_container_id: str | None = None
+        self.mobsf_running = False
+        self.mobsf_status_label: QLabel | None = None
+        self.mobsf_scan_status_label: QLabel | None = None
+        self.mobsf_setup_button: QPushButton | None = None
+        self.mobsf_stop_button: QPushButton | None = None
+        self.mobsf_run_button: QPushButton | None = None
+        self.mobsf_open_report_button: QPushButton | None = None
+        self.mobsf_log_view: QPlainTextEdit | None = None
 
         self.setWindowTitle("TAPKA — Tools for APK analysis")
         self.setMinimumSize(1100, 720)
@@ -175,6 +245,7 @@ class MainWindow(QMainWindow):
             self.setWindowIcon(QIcon(str(self._logo_path)))
 
         self._build_ui()
+        self._load_mobsf_settings()
         self._apply_theme()
         self._setup_timers()
         self.refresh_projects()
@@ -184,6 +255,13 @@ class MainWindow(QMainWindow):
         self._analysis_timer = QTimer(self)
         self._analysis_timer.setInterval(1000)
         self._analysis_timer.timeout.connect(self._tick_analysis_timer)
+
+    def closeEvent(self, event) -> None:  # pylint: disable=invalid-name
+        try:
+            stop_mobsf()
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+        super().closeEvent(event)
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -299,6 +377,8 @@ class MainWindow(QMainWindow):
         self.project_run_label = QLabel("-")
         self.apk_version_combo = QComboBox()
         self.apk_version_combo.currentIndexChanged.connect(self._on_version_changed)
+        self.add_apk_button = QPushButton("Add APK")
+        self.add_apk_button.clicked.connect(self._add_apk)
 
         for label in (
             self.project_id_label,
@@ -323,6 +403,7 @@ class MainWindow(QMainWindow):
         project_layout.addWidget(self.project_apk_label, 3, 1)
         project_layout.addWidget(QLabel("APK version"), 4, 0)
         project_layout.addWidget(self.apk_version_combo, 4, 1)
+        project_layout.addWidget(self.add_apk_button, 4, 2, 1, 2, Qt.AlignRight)
         project_layout.addWidget(QLabel("SHA256"), 0, 2)
         project_layout.addWidget(self.project_hash_label, 0, 3)
         project_layout.addWidget(QLabel("Size"), 1, 2)
@@ -351,9 +432,7 @@ class MainWindow(QMainWindow):
             STAGES[1][1],
         )
         self.stage_tabs.addTab(
-            self._build_stub_stage_page(
-                "Cross-tool analysis will be available in a future update.",
-            ),
+            self._build_stage3_page(),
             STAGES[2][1],
         )
         self.stage_tabs.addTab(
@@ -382,6 +461,73 @@ class MainWindow(QMainWindow):
         stage1_layout.addWidget(self.tabs, stretch=1)
         return stage1_page
 
+    def _build_stage3_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(12)
+        layout.addWidget(self._build_mobsf_setup_card())
+        layout.addStretch()
+        return page
+
+    def _build_mobsf_setup_card(self) -> QFrame:
+        card = QFrame()
+        card.setObjectName("card")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(8)
+
+        header = QLabel("MobSF setup")
+        header.setObjectName("sectionTitle")
+        layout.addWidget(header)
+
+        hint = QLabel("Start MobSF in Docker and cache credentials for Stage3 automation.")
+        hint.setObjectName("muted")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        form = QFormLayout()
+        form.setHorizontalSpacing(16)
+        form.setVerticalSpacing(6)
+
+        self.mobsf_status_label = QLabel("Not configured")
+        self.mobsf_status_label.setObjectName("muted")
+        form.addRow("Status:", self.mobsf_status_label)
+
+        self.mobsf_scan_status_label = QLabel("Idle")
+        self.mobsf_scan_status_label.setObjectName("muted")
+        form.addRow("Scan status:", self.mobsf_scan_status_label)
+
+        layout.addLayout(form)
+
+        button_row = QHBoxLayout()
+        self.mobsf_setup_button = QPushButton("Start MobSF")
+        self.mobsf_setup_button.setObjectName("primaryButton")
+        self.mobsf_setup_button.clicked.connect(self._start_mobsf_setup)
+        button_row.addWidget(self.mobsf_setup_button)
+
+        self.mobsf_stop_button = QPushButton("Stop MobSF")
+        self.mobsf_stop_button.clicked.connect(self._stop_mobsf)
+        button_row.addWidget(self.mobsf_stop_button)
+
+        self.mobsf_run_button = QPushButton("Run MobSF")
+        self.mobsf_run_button.clicked.connect(self._run_mobsf_analysis)
+        button_row.addWidget(self.mobsf_run_button)
+
+        self.mobsf_open_report_button = QPushButton("Open Stage3 report")
+        self.mobsf_open_report_button.clicked.connect(self._open_report)
+        button_row.addWidget(self.mobsf_open_report_button)
+
+        button_row.addStretch()
+        layout.addLayout(button_row)
+
+        self.mobsf_log_view = QPlainTextEdit()
+        self.mobsf_log_view.setReadOnly(True)
+        self.mobsf_log_view.setMaximumBlockCount(200)
+        self.mobsf_log_view.setPlaceholderText("MobSF setup logs will appear here.")
+        layout.addWidget(self.mobsf_log_view)
+        return card
+
     def _build_stub_stage_page(self, hint_text: str) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -403,10 +549,6 @@ class MainWindow(QMainWindow):
         actions_layout = QHBoxLayout(actions_card)
         actions_layout.setContentsMargins(16, 12, 16, 12)
         actions_layout.setSpacing(10)
-
-        self.add_apk_button = QPushButton("Add APK")
-        self.add_apk_button.clicked.connect(self._add_apk)
-        actions_layout.addWidget(self.add_apk_button)
 
         self.run_analysis_button = QPushButton("Run analysis")
         self.run_analysis_button.setObjectName("primaryButton")
@@ -626,6 +768,173 @@ class MainWindow(QMainWindow):
 
     def _apply_theme(self) -> None:
         self.setStyleSheet(get_style())
+
+    def _load_mobsf_settings(self) -> None:
+        settings = load_settings()
+        mobsf = settings.get("mobsf", {})
+        self.mobsf_base_url = mobsf.get("url", DEFAULT_MOBSF_URL)
+        self.mobsf_api_key = mobsf.get("api_key")
+        self.mobsf_container_id = mobsf.get("container_id")
+        self.mobsf_running = False
+        self._update_mobsf_labels()
+
+    def _save_mobsf_settings(self) -> None:
+        settings = load_settings()
+        mobsf = settings.get("mobsf", {})
+        mobsf["url"] = self.mobsf_base_url
+        if self.mobsf_api_key:
+            mobsf["api_key"] = self.mobsf_api_key
+        if self.mobsf_container_id:
+            mobsf["container_id"] = self.mobsf_container_id
+        settings["mobsf"] = mobsf
+        save_settings(settings)
+
+    def _update_mobsf_labels(self) -> None:
+        if self.mobsf_status_label:
+            if self.mobsf_running:
+                status = "Running"
+            else:
+                status = "Ready" if self.mobsf_api_key else "Not configured"
+            self.mobsf_status_label.setText(status)
+
+    def _set_mobsf_status(self, text: str) -> None:
+        if self.mobsf_status_label:
+            self.mobsf_status_label.setText(text)
+
+    def _set_mobsf_scan_status(self, text: str) -> None:
+        if self.mobsf_scan_status_label:
+            self.mobsf_scan_status_label.setText(text)
+
+    def _normalize_mobsf_url(self) -> None:
+        self.mobsf_base_url = normalize_base_url(self.mobsf_base_url)
+
+    def _append_mobsf_log(self, message: str) -> None:
+        if not self.mobsf_log_view:
+            return
+        self.mobsf_log_view.appendPlainText(message)
+        self.mobsf_log_view.verticalScrollBar().setValue(
+            self.mobsf_log_view.verticalScrollBar().maximum()
+        )
+
+    def _handle_mobsf_progress(self, message: str) -> None:
+        prefix = "MOBSF_SCAN_STATUS:"
+        if message.startswith(prefix):
+            status = message[len(prefix):].strip() or "-"
+            self._set_mobsf_scan_status(status)
+            self._append_mobsf_log(f"Scan status: {status}")
+            return
+        self._append_mobsf_log(message)
+
+    def _start_mobsf_setup(self) -> None:
+        if self.mobsf_setup_in_progress:
+            return
+        self._normalize_mobsf_url()
+        self.mobsf_setup_in_progress = True
+        if self.mobsf_log_view:
+            self.mobsf_log_view.clear()
+        self._set_mobsf_status("Starting...")
+        self._append_mobsf_log("Preparing MobSF setup...")
+        self._update_action_states()
+
+        self.mobsf_worker = MobSFSetupWorker(self.mobsf_base_url, self.mobsf_api_key)
+        self.mobsf_worker.progress.connect(self._append_mobsf_log)
+        self.mobsf_worker.finished.connect(self._on_mobsf_setup_finished)
+        self.mobsf_worker.failed.connect(self._on_mobsf_setup_failed)
+        self.mobsf_worker.start()
+
+    def _on_mobsf_setup_finished(self, result) -> None:
+        self.mobsf_setup_in_progress = False
+        self.mobsf_base_url = result.base_url
+        self.mobsf_api_key = result.api_key
+        self.mobsf_container_id = result.container_id
+        self.mobsf_running = True
+        self._save_mobsf_settings()
+        self._update_mobsf_labels()
+        self._append_mobsf_log("MobSF is ready.")
+        self._set_mobsf_scan_status("Idle")
+        self._update_action_states()
+
+    def _on_mobsf_setup_failed(self, message: str) -> None:
+        self.mobsf_setup_in_progress = False
+        self.mobsf_running = False
+        self._set_mobsf_status("Failed")
+        self._set_mobsf_scan_status("Idle")
+        self._append_mobsf_log("MobSF setup failed.")
+        self._update_action_states()
+        QMessageBox.warning(self, "MobSF setup failed", message)
+
+    def _stop_mobsf(self) -> None:
+        if self.mobsf_setup_in_progress:
+            return
+        self.mobsf_setup_in_progress = True
+        self._set_mobsf_status("Stopping...")
+        self._append_mobsf_log("Stopping MobSF...")
+        self._update_action_states()
+
+        self.mobsf_stop_worker = MobSFStopWorker()
+        self.mobsf_stop_worker.progress.connect(self._append_mobsf_log)
+        self.mobsf_stop_worker.finished.connect(self._on_mobsf_stop_finished)
+        self.mobsf_stop_worker.failed.connect(self._on_mobsf_stop_failed)
+        self.mobsf_stop_worker.start()
+
+    def _on_mobsf_stop_finished(self, stopped: bool) -> None:
+        self.mobsf_setup_in_progress = False
+        self.mobsf_running = False
+        self._update_mobsf_labels()
+        self._set_mobsf_scan_status("Idle")
+        if stopped:
+            self._append_mobsf_log("MobSF stopped.")
+        else:
+            self._append_mobsf_log("MobSF container was not running.")
+        self._update_action_states()
+
+    def _on_mobsf_stop_failed(self, message: str) -> None:
+        self.mobsf_setup_in_progress = False
+        self._set_mobsf_status("Stop failed")
+        self._append_mobsf_log("MobSF stop failed.")
+        self._update_action_states()
+        QMessageBox.warning(self, "MobSF stop failed", message)
+
+    def _run_mobsf_analysis(self) -> None:
+        if self.mobsf_run_in_progress:
+            return
+        if not self.current_project or not self.current_project.apk_meta:
+            QMessageBox.warning(self, "MobSF", "Select a project with an APK first.")
+            return
+        if self.current_stage_id != STAGE_CROSS_TOOL:
+            self.current_stage_id = STAGE_CROSS_TOOL
+        self.mobsf_run_in_progress = True
+        self._append_mobsf_log("Starting MobSF Stage3 analysis...")
+        self._set_mobsf_status("Running Stage3...")
+        self._set_mobsf_scan_status("Starting...")
+        self._update_action_states()
+
+        config = Stage3Config()
+        self.mobsf_run_worker = Stage3Worker(self.storage, self.current_project.project_id, config)
+        self.mobsf_run_worker.progress.connect(self._handle_mobsf_progress)
+        self.mobsf_run_worker.finished.connect(self._on_mobsf_run_finished)
+        self.mobsf_run_worker.failed.connect(self._on_mobsf_run_failed)
+        self.mobsf_run_worker.start()
+
+    def _on_mobsf_run_finished(self, run: Run) -> None:
+        self.mobsf_run_in_progress = False
+        self.current_run = run
+        self.current_run_dir = self.storage.get_run_dir(run.project_id, run.run_id)
+        self.status_badge.setText(run.status)
+        self.project_run_label.setText(run.finished_at or run.started_at)
+        self._append_mobsf_log("Stage3 MobSF run completed.")
+        self._set_mobsf_scan_status("Completed")
+        self._load_latest_run()
+        self._update_action_states()
+
+    def _on_mobsf_run_failed(self, message: str) -> None:
+        self.mobsf_run_in_progress = False
+        self._set_mobsf_status("Stage3 failed")
+        self._append_mobsf_log("Stage3 MobSF run failed.")
+        self._set_mobsf_scan_status("Failed")
+        self._load_latest_run()
+        self._update_action_states()
+        QMessageBox.warning(self, "MobSF Stage3 failed", message)
 
     def refresh_projects(self) -> None:
         self.project_list.clear()
@@ -1099,6 +1408,13 @@ class MainWindow(QMainWindow):
         _, _, html_path = resolved
         return html_path.exists()
 
+    def _report_available_for_stage(self, stage_id: str) -> bool:
+        resolved = self._report_paths(stage_id)
+        if not resolved:
+            return False
+        _, _, html_path = resolved
+        return html_path.exists()
+
     def _update_action_states(self) -> None:
         has_project = self.current_project is not None
         has_apk = has_project and self.current_project.apk_meta is not None
@@ -1122,6 +1438,24 @@ class MainWindow(QMainWindow):
         self.log_open_button.setEnabled(has_run)
         self.artifacts_open_button.setEnabled(has_run)
         self.artifacts_reveal_button.setEnabled(has_run)
+        if self.mobsf_setup_button:
+            self.mobsf_setup_button.setEnabled(
+                not self.mobsf_setup_in_progress and not self.mobsf_run_in_progress
+            )
+        if self.mobsf_stop_button:
+            self.mobsf_stop_button.setEnabled(
+                not self.mobsf_setup_in_progress and self.mobsf_running and not self.mobsf_run_in_progress
+            )
+        if self.mobsf_run_button:
+            can_run_stage3 = (
+                has_apk
+                and self.current_stage_id == STAGE_CROSS_TOOL
+                and self.mobsf_running
+            )
+            self.mobsf_run_button.setEnabled(not self.mobsf_run_in_progress and can_run_stage3)
+        if self.mobsf_open_report_button:
+            stage3_ready = self._report_available_for_stage(STAGE_CROSS_TOOL)
+            self.mobsf_open_report_button.setEnabled(stage3_ready and not self.mobsf_run_in_progress)
 
     def _set_tool_status(self, tool: str, status: str, text: str | None = None) -> None:
         button = self.tool_status_buttons.get(tool)

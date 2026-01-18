@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 from analysis.severity import SeverityEngine
 from analysis.stages import STAGE_CROSS_TOOL, STAGE_DYNAMIC, STAGE_OVERALL, STAGE_STATIC
 from analysis.storage import Storage
+from analysis.reporting.stage3_html_report import Stage3HtmlRenderer
 from models import (
     BaseReportModel,
     Finding,
@@ -110,7 +111,7 @@ ENDPOINT_EXAMPLE_LIMIT = 3
 
 
 def _logo_data_uri() -> str | None:
-    logo_path = Path(__file__).resolve().parent.parent / "ui" / "87288873-75ab-4871-bf62-f126ff451e6c.png"
+    logo_path = Path(__file__).resolve().parents[2] / "ui" / "87288873-75ab-4871-bf62-f126ff451e6c.png"
     if not logo_path.exists():
         return None
     data = base64.b64encode(logo_path.read_bytes()).decode("ascii")
@@ -213,6 +214,14 @@ class ReportManager:
         json_path, html_path = self.report_paths(run_dir, STAGE_STATIC)
         json_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
         html_path.write_text(Stage1HtmlRenderer().render(report), encoding="utf-8")
+        return json_path, html_path
+
+    def generate_stage3(self, run: Run, run_dir: Path, mobsf_report) -> tuple[Path, Path]:
+        project = self.storage.load_project(run.project_id)
+        report = self._build_stage3_report(project, run, run_dir, mobsf_report)
+        json_path, html_path = self.report_paths(run_dir, STAGE_CROSS_TOOL)
+        json_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+        html_path.write_text(Stage3HtmlRenderer().render(report), encoding="utf-8")
         return json_path, html_path
 
     def generate_stage2_stub(self, run: Run, run_dir: Path) -> tuple[Path, Path]:
@@ -384,6 +393,59 @@ class ReportManager:
             artifacts=self._collect_artifacts(run_dir),
             status="not_implemented",
             notes=notes,
+        )
+
+    def _build_stage3_report(
+        self,
+        project: Project,
+        run: Run,
+        run_dir: Path,
+        mobsf_report,
+    ) -> Stage3ReportModel:
+        now = datetime.now().isoformat(timespec="seconds")
+        apk_path = self.storage.get_apk_path(project.project_id)
+        project_info = project.apk_meta
+        project_model = ProjectInfo(
+            project_id=project.project_id,
+            apk_name=project_info.name if project_info else None,
+            apk_sha256=project_info.sha256 if project_info else None,
+            apk_size=project_info.size if project_info else None,
+            apk_path=str(apk_path) if apk_path else None,
+        )
+        duration_sec = None
+        if run.finished_at:
+            try:
+                duration_sec = (
+                    datetime.fromisoformat(run.finished_at) - datetime.fromisoformat(run.started_at)
+                ).total_seconds()
+            except (ValueError, TypeError):
+                duration_sec = None
+        run_model = RunInfo(
+            run_id=run.run_id,
+            stage=run.stage,
+            status=run.status,
+            started_at=run.started_at,
+            finished_at=run.finished_at,
+            duration_sec=duration_sec,
+            run_dir=str(run_dir),
+        )
+        status = "ok" if run.status == "Done" else "fail"
+        tool_statuses = [
+            ToolStatus(tool="MobSF", status=status, details="MobSF REST API")
+        ]
+        artifacts = self._collect_artifacts(run_dir)
+        notes = list(run.errors) if run.errors else []
+        return Stage3ReportModel(
+            report_type=STAGE_CROSS_TOOL,
+            generated_at=now,
+            project=project_model,
+            run=run_model,
+            tool_statuses=tool_statuses,
+            findings=[],
+            artifacts=artifacts,
+            status=status,
+            notes=notes,
+            mobsf=mobsf_report,
         )
 
     def _write_stub(
@@ -572,6 +634,9 @@ class ReportManager:
             folder_path = artifacts_dir / folder
             if folder_path.exists():
                 paths.append(str(folder_path.relative_to(run_dir)) + "/")
+        mobsf_path = artifacts_dir / "mobsf"
+        if mobsf_path.exists():
+            paths.append(str(mobsf_path.relative_to(run_dir)) + "/")
         return paths
 
     def _parse_package_info(self, run_dir: Path) -> dict[str, str]:
@@ -865,6 +930,35 @@ class Stage1HtmlRenderer:
       </div>
     </div>
 
+    <h2>Static analysis highlights</h2>
+    <div class="grid grid-3">
+      <div class="card">
+        <h3>Permissions & Exported</h3>
+        {self._summary_line("Permissions", str(context["mobsf_permissions_total"]))}
+        {self._summary_line("Exported", str(context["mobsf_exported_total"]))}
+        <div class="muted">Top permissions</div>
+        {context["mobsf_permissions"]}
+        <div class="muted">Top exported</div>
+        {context["mobsf_exported"]}
+      </div>
+      <div class="card">
+        <h3>Code & Manifest Summary</h3>
+        <div class="muted">Manifest findings</div>
+        {context["mobsf_manifest_summary"]}
+        <div class="muted">Code findings</div>
+        {context["mobsf_code_summary"]}
+        {self._summary_line("Secrets", str(context["mobsf_secrets_total"]))}
+        {self._summary_line("Crypto indicators", str(context["mobsf_crypto_total"]))}
+      </div>
+      <div class="card">
+        <h3>Network & Trackers</h3>
+        {self._summary_line("URLs", str(context["mobsf_urls_total"]))}
+        {self._summary_line("IPs", str(context["mobsf_ips_total"]))}
+        {self._summary_line("Domains", "N/A")}
+        {self._summary_line("Trackers", "N/A")}
+      </div>
+    </div>
+
     <h2>Extracted endpoints (rg)</h2>
     {context["endpoints_section"]}
 
@@ -878,6 +972,7 @@ class Stage1HtmlRenderer:
         <option value="info">Info</option>
       </select>
       <input type="text" id="searchInput" placeholder="Search findings"/>
+      {context["show_more_severity"]}
       {context["show_more_low_info"]}
     </div>
     {context["findings_sections"] or '<p class="muted">No findings.</p>'}
@@ -894,7 +989,9 @@ class Stage1HtmlRenderer:
     const rows = document.querySelectorAll('.findings-table tbody tr');
 
     function isHidden(row) {{
-      return row.dataset.hiddenGlobal === '1' || row.dataset.hiddenCategory === '1';
+      return row.dataset.hiddenGlobal === '1'
+        || row.dataset.hiddenCategory === '1'
+        || row.dataset.hiddenSeverity === '1';
     }}
 
     function applyFilters() {{
@@ -909,8 +1006,21 @@ class Stage1HtmlRenderer:
         row.style.display = visible ? '' : 'none';
       }});
     }}
+    severityFilter.value = 'high';
     severityFilter.addEventListener('change', applyFilters);
     searchInput.addEventListener('input', applyFilters);
+
+    const showOtherFindings = document.getElementById('showOtherFindings');
+    if (showOtherFindings) {{
+      showOtherFindings.addEventListener('click', () => {{
+        rows.forEach(row => {{
+          row.dataset.hiddenSeverity = '0';
+        }});
+        showOtherFindings.style.display = 'none';
+        severityFilter.value = 'all';
+        applyFilters();
+      }});
+    }}
 
     const showMoreLowInfo = document.getElementById('showMoreLowInfo');
     if (showMoreLowInfo) {{
@@ -938,6 +1048,8 @@ class Stage1HtmlRenderer:
         applyFilters();
       }});
     }});
+
+    applyFilters();
 
     const endpointSearch = document.getElementById('endpointSearch');
     const endpointHideNoise = document.getElementById('endpointHideNoise');
@@ -981,13 +1093,30 @@ class Stage1HtmlRenderer:
     def _build_context(self, report: Stage1ReportModel) -> dict[str, object]:
         severity_counts = self._severity_counts(report.findings)
         url_map, ip_map = _collect_endpoints(report.findings)
-        findings_sections, show_more_low_info = self._render_findings_sections(report.findings)
+        findings_sections, show_more_low_info, show_more_severity = self._render_findings_sections(
+            report.findings
+        )
+        permissions_top = report.manifest_permissions[:10]
+        exported_top = report.manifest_exported[:10]
+        manifest_summary = self._severity_counts_by_evidence(report.findings, "manifest")
+        code_summary = self._severity_counts_by_evidence(report.findings, "code")
+        secrets_total = self._count_keyword_findings(
+            report.findings,
+            keywords=("secret", "credential", "api_key", "apikey", "token"),
+            tag_names=("secret", "credential", "api_key", "apikey", "token"),
+        )
+        crypto_total = self._count_keyword_findings(
+            report.findings,
+            keywords=("crypto", "cipher", "encryption", "hash"),
+            tag_names=("crypto", "cryptography"),
+        )
         return {
             "severity_counts": severity_counts,
             "total_findings": len(report.findings),
             "tool_cards": self._render_tool_cards(report.tool_statuses),
             "findings_sections": findings_sections,
             "show_more_low_info": show_more_low_info,
+            "show_more_severity": show_more_severity,
             "artifacts": self._render_artifacts(report.artifacts, report.run.run_dir),
             "yara_matches": self._format_tool_value(report.tool_statuses, "yara", "matches"),
             "signing_issues": sum(report.signing_summary.values()),
@@ -995,6 +1124,16 @@ class Stage1HtmlRenderer:
             "manifest_info": self._render_list(report.manifest_permissions),
             "exported_info": self._render_list(report.manifest_exported),
             "flags_info": self._render_list(report.manifest_flags),
+            "mobsf_permissions": self._render_list(permissions_top),
+            "mobsf_exported": self._render_list(exported_top),
+            "mobsf_permissions_total": len(report.manifest_permissions),
+            "mobsf_exported_total": len(report.manifest_exported),
+            "mobsf_urls_total": len(url_map),
+            "mobsf_ips_total": len(ip_map),
+            "mobsf_manifest_summary": self._render_summary_table(manifest_summary),
+            "mobsf_code_summary": self._render_summary_table(code_summary),
+            "mobsf_secrets_total": secrets_total,
+            "mobsf_crypto_total": crypto_total,
             "brand_logo": self._render_brand_logo(),
         }
 
@@ -1005,6 +1144,35 @@ class Stage1HtmlRenderer:
             if level in counts:
                 counts[level] += 1
         return counts
+
+    def _severity_counts_by_evidence(
+        self, findings: list[Finding], evidence_type: str
+    ) -> dict[str, int]:
+        counts = {level: 0 for level in SEVERITY_ORDER}
+        for finding in findings:
+            if (finding.evidence_type or "").lower() != evidence_type.lower():
+                continue
+            level = (finding.severity or "info").lower()
+            if level in counts:
+                counts[level] += 1
+        return counts
+
+    def _count_keyword_findings(
+        self,
+        findings: list[Finding],
+        keywords: tuple[str, ...],
+        tag_names: tuple[str, ...],
+    ) -> int:
+        total = 0
+        for finding in findings:
+            category = (finding.category or "").lower()
+            tags = {tag.lower() for tag in finding.tags}
+            if any(keyword in category for keyword in keywords):
+                total += 1
+                continue
+            if any(tag in tags for tag in tag_names):
+                total += 1
+        return total
 
     def _render_tool_cards(self, tool_statuses: list[ToolStatus]) -> str:
         cards = []
@@ -1020,12 +1188,13 @@ class Stage1HtmlRenderer:
             )
         return "".join(cards)
 
-    def _render_findings_sections(self, findings: list[Finding]) -> tuple[str, str]:
+    def _render_findings_sections(self, findings: list[Finding]) -> tuple[str, str, str]:
         findings_state = {
             "low_info_limit": 50,
             "category_limit": 20,
             "low_info_seen": 0,
             "has_hidden_global": False,
+            "has_hidden_severity": False,
         }
         findings_by_category = self._group_findings(findings)
         findings_sections = []
@@ -1061,7 +1230,12 @@ class Stage1HtmlRenderer:
             if findings_state["has_hidden_global"]
             else ""
         )
-        return "".join(findings_sections), show_more_low_info
+        show_more_severity = (
+            '<button id="showOtherFindings" class="ghost-btn">Show other severities</button>'
+            if findings_state["has_hidden_severity"]
+            else ""
+        )
+        return "".join(findings_sections), show_more_low_info, show_more_severity
 
     def _render_artifacts(self, artifacts: list[str], run_dir: str | None) -> str:
         rows = []
@@ -1135,6 +1309,15 @@ class Stage1HtmlRenderer:
         if not items:
             return "<p class=\"muted\">None</p>"
         return "<ul>" + "".join(f"<li>{html.escape(item)}</li>" for item in items) + "</ul>"
+
+    def _render_summary_table(self, data: dict[str, int]) -> str:
+        if not data:
+            return "<p class=\"muted\">N/A</p>"
+        rows = "".join(
+            f"<tr><th>{html.escape(str(k))}</th><td>{html.escape(str(v))}</td></tr>"
+            for k, v in data.items()
+        )
+        return f"<table>{rows}</table>"
 
     def _artifact_path(self, run_dir: str | None, filename: str) -> str:
         if not run_dir:
@@ -1282,6 +1465,7 @@ class Stage1HtmlRenderer:
         has_hidden_category = False
         for finding in findings:
             severity = (finding.severity or "info").lower()
+            hidden_severity = severity != "high"
             hidden_global = False
             hidden_category = False
             if severity in ("low", "info"):
@@ -1296,6 +1480,8 @@ class Stage1HtmlRenderer:
                     low_info_seen_by_category += 1
             if hidden_global or hidden_category:
                 has_hidden_category = True
+            if hidden_severity:
+                state["has_hidden_severity"] = True
             badge = f'<span class="badge badge-{severity}">{html.escape(severity)}</span>'
             evidence = html.escape(finding.evidence or finding.match or "-")
             sources = html.escape(", ".join(finding.sources or []))
@@ -1316,6 +1502,7 @@ class Stage1HtmlRenderer:
                     data-category="{html.escape(category_label)}"
                     data-hidden-global="{'1' if hidden_global else '0'}"
                     data-hidden-category="{'1' if hidden_category else '0'}"
+                    data-hidden-severity="{'1' if hidden_severity else '0'}"
                     data-text="{html.escape(searchable)}">
                   <td>{badge}</td>
                   <td>{display_category}</td>
