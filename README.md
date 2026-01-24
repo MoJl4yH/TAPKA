@@ -63,6 +63,7 @@ docker ps
 2) Add APK -> создается новая версия внутри проекта.
 3) Run analysis -> выполняется Stage1.
 4) Open report -> HTML отчет Stage1.
+5) Open analysis directory -> папка run с логами/артефактами.
 
 Добавление новой версии APK:
 - повторно нажать Add APK в текущем проекте;
@@ -79,7 +80,7 @@ tapka_workspace/
     versions/<version_id>/
       apk/original.apk
       meta.json
-      runs/<run_id>/
+      runs/<run_id>_stage1_static/
         run.json
         logs/
           *.stdout.txt / *.stderr.txt
@@ -89,24 +90,40 @@ tapka_workspace/
           out_apktool/
           out_jadx/
           certs/
+          strings_so_scan.txt
+          strings_so_rg_hits.txt
           stage1_report.json
           stage1_report.html
           stage2_report.json/html (stub)
           stage3_report.json/html (stub)
           overall_report.json/html (stub)
           endpoints.urls.txt / endpoints.ips.txt / endpoints.*.json
+      runs/<run_id>_stage3_cross_tool/
+        run.json
+        env/
+        tools/
+          mobsf/
+          quark/
+          apkid/
+          apkleaks/
+        normalized/indicators.json
+        report/
 ```
 
 ## Что делает Stage1
 Запускает набор локальных инструментов и формирует findings:
 - apksigner, aapt2, apktool, jadx
-- rg/strings (паттерны: endpoints, secrets, динамический код, антиотладка и пр.)
+- rg/strings (паттерны: endpoints, IPv4, secrets/JWT, динамический код, антиотладка)
 - yara (правила: android_spy_triage.yar)
 
 После завершения:
 - генерируется HTML + JSON отчет Stage1;
 - создаются файлы endpoints.*;
 - собираются логи по каждому инструменту.
+
+## Stage3 (Cross-tool analysis)
+- Каждый инструмент пишет артефакты в `tools/<tool>/` внутри текущего Stage3 run.
+- Нормализация Stage3 пишет индикаторы в `normalized/indicators.json`.
 
 ## Отчеты
 Stage1 отчет генерируется автоматически после анализа.
@@ -122,6 +139,7 @@ HTML отчет содержит:
 ## Логи и прогресс
 - В `runner.log` пишутся ключевые шаги Stage1.
 - Во время анализа GUI показывает elapsed time, а лог обновляется в real-time.
+- Вкладка Stage1 показывает компактный Output log; детали по findings/метрикам доступны в отчете и артефактах.
 
 ## Внутренний контекст разработки
 Ключевые модули:

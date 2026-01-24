@@ -7,7 +7,7 @@ import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
+from typing import Callable, TextIO
 import xml.etree.ElementTree as ET
 
 from analysis.runner import run_command
@@ -112,16 +112,11 @@ class Stage1StaticRunner:
     ]
     CERT_LIST_PATTERN = r"META-INF/.*\.(RSA|DSA|EC)$"
     JADX_PARTIAL_PATTERN = re.compile(r"finished with errors", re.IGNORECASE)
+    APKTOOL_FLEX_PATTERN = re.compile(r"flex scanner failed", re.IGNORECASE)
     RG_PATTERN_SPECS = [
         {
             "category": "secret_endpoints_hardcoded",
-            "pattern": (
-                r"(?x)(https?|wss?|mqtts?|grpc|grpcs|rtsp)://"
-                r"(?!schemas\.android\.com)"
-                r"(?!.*\b(google|googleapis|gstatic|android|w3|microsoft|github|gitlab|bitbucket|"
-                r"kotlinlang|jetbrains|apache|mozilla|openjdk|oracle)\.)"
-                r"[^\" <>{}]{8,}"
-            ),
+            "pattern": r'(https?|wss?|ftp|grpc|grpcs|mqtts?|rtsp)://(?!schemas\.android\.com)[^" <>{}]{8,}',
             "targets": ("apktool", "jadx"),
             "confidence": "C1",
             "evidence_type": "string",
@@ -139,7 +134,7 @@ class Stage1StaticRunner:
         },
         {
             "category": "secret_sensitive_kv",
-            "pattern": r"(?i)\b(api[_-]?key|secret|token|password|passwd|pwd|auth[_-]?token|access[_-]?token|private[_-]?key)\b\s*[:=>]\s*['\"][A-Za-z0-9+/=_\-.]{8,}['\"]",
+            "pattern": r"(?i)\b(api[_-]?key|secret|token|password|passwd|pwd|auth[_-]?token|access[_-]?token|private[_-]?key)\b\s*[:=>]\s*[\"'][A-Za-z0-9+/=_\-.]{8,}[\"']",
             "targets": ("apktool", "jadx"),
             "confidence": "C1",
             "evidence_type": "string",
@@ -166,39 +161,12 @@ class Stage1StaticRunner:
         },
         {
             "category": "ndv_dynamic_code_loading",
-            "pattern": r"DexClassLoader|InMemoryDexClassLoader|PathClassLoader|loadDex|defineClass",
-            "targets": ("jadx", "apktool"),
+            "pattern": r"DexClassLoader|InMemoryDexClassLoader|PathClassLoader|loadDex|defineClass|Runtime\.exec|ProcessBuilder|System\.loadLibrary|System\.load",
+            "targets": ("jadx",),
             "confidence": "C2",
             "evidence_type": "code",
             "tags": {"dynamic_code"},
             "source": "dynamic_code_loader",
-        },
-        {
-            "category": "ndv_native_code_loader_suspicious",
-            "pattern": r"System\.loadLibrary|System\.load|dlopen",
-            "targets": ("jadx", "apktool"),
-            "confidence": "C2",
-            "evidence_type": "code",
-            "tags": {"dynamic_code"},
-            "source": "native_code_loader",
-        },
-        {
-            "category": "ndv_remote_command",
-            "pattern": r"(?i)\b(cmd|command|exec|shell|task|opcode|action|payload)\b",
-            "targets": ("jadx",),
-            "confidence": "C1",
-            "evidence_type": "string",
-            "tags": set(),
-            "source": "cmd_keys",
-        },
-        {
-            "category": "ndv_remote_command",
-            "pattern": r"Runtime\.exec|ProcessBuilder",
-            "targets": ("jadx", "apktool"),
-            "confidence": "C2",
-            "evidence_type": "code",
-            "tags": set(),
-            "source": "command_exec",
         },
         {
             "category": "sec_insecure_webview_bridge",
@@ -354,24 +322,6 @@ class Stage1StaticRunner:
             "source": "vpn_service",
         },
         {
-            "category": "signal_download_manager",
-            "pattern": r"DownloadManager|enqueue\(",
-            "targets": ("jadx",),
-            "confidence": "C2",
-            "evidence_type": "code",
-            "tags": set(),
-            "source": "download_manager",
-        },
-        {
-            "category": "ndv_reflection_heavy",
-            "pattern": r"Class\.forName|Method\.invoke|getDeclaredMethod|getDeclaredField",
-            "targets": ("jadx",),
-            "confidence": "C2",
-            "evidence_type": "code",
-            "tags": set(),
-            "source": "reflection",
-        },
-        {
             "category": "persist_workmanager_periodic",
             "pattern": r"WorkManager|PeriodicWorkRequest",
             "targets": ("jadx",),
@@ -399,73 +349,35 @@ class Stage1StaticRunner:
             "source": "alarmmanager",
         },
         {
-            "category": "anomaly_root_detection",
-            "pattern": r"/system/bin/su|/system/xbin/su|busybox",
-            "targets": ("jadx", "apktool"),
-            "confidence": "C2",
-            "evidence_type": "code",
-            "tags": set(),
-            "source": "root_check",
-        },
-        {
             "category": "anomaly_frida_xposed_magisk_detection",
-            "pattern": r"(?i)\b(frida|xposed|substrate|magisk)\b",
-            "targets": ("jadx", "apktool"),
+            "pattern": r"(?i)\b(emulator|goldfish|ranchu|genymotion|frida|xposed|substrate|magisk|busybox)\b",
+            "targets": ("jadx",),
             "confidence": "C2",
             "evidence_type": "code",
             "tags": set(),
-            "source": "frida_xposed",
-        },
-        {
-            "category": "anomaly_emulator_detection",
-            "pattern": r"(?i)\b(emulator|goldfish|ranchu|genymotion)\b",
-            "targets": ("jadx", "apktool"),
-            "confidence": "C2",
-            "evidence_type": "code",
-            "tags": set(),
-            "source": "emulator_check",
+            "source": "analysis_evasion",
         },
         {
             "category": "anomaly_anti_debug",
-            "pattern": r"Debug\.isDebuggerConnected|TracerPid",
-            "targets": ("jadx", "apktool"),
+            "pattern": r"(?i)(?:/system/(?:bin|xbin)/su\b|\bBuild\.(?:FINGERPRINT|MODEL)\b|\bDebug\.isDebuggerConnected\b|\bTracerPid\b)",
+            "targets": ("jadx",),
             "confidence": "C2",
             "evidence_type": "code",
             "tags": set(),
-            "source": "anti_debug",
+            "source": "analysis_evasion",
         },
     ]
     STRINGS_PATTERN_STRINGS = {
-        "secret_endpoints_hardcoded": (
-            r"(?x)(https?|wss?|mqtts?|grpc|grpcs|rtsp)://"
-            r"(?!schemas\.android\.com)"
-            r"(?!.*\b(google|googleapis|gstatic|android|w3|microsoft|github|gitlab|bitbucket|"
-            r"kotlinlang|jetbrains|apache|mozilla|openjdk|oracle)\.)"
-            r"[^\" <>{}]{8,}"
-        ),
+        "secret_endpoints_hardcoded": r'(https?|wss?|ftp|grpc|grpcs|mqtts?|rtsp)://(?!schemas\.android\.com)[^" <>{}]{8,}',
         "secret_endpoints_ipv4": r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])",
         "ndv_dynamic_code_loading": r"DexClassLoader|InMemoryDexClassLoader|PathClassLoader",
-        "ndv_native_code_loader_suspicious": r"System\.loadLibrary|System\.load|dlopen",
         "ndv_remote_command": r"Runtime\.exec|ProcessBuilder",
-        "anomaly_root_detection": r"/system/bin/su|/system/xbin/su",
-        "anomaly_anti_debug": r"TracerPid|Debug\.isDebuggerConnected",
-        "sec_proxy_setting_modification": r"settings\s+put\s+global\s+http_proxy",
     }
     STRINGS_CATEGORY_META = {
         "secret_endpoints_hardcoded": {"tags": {"network"}, "category": "secret_endpoints_hardcoded"},
         "secret_endpoints_ipv4": {"tags": {"network"}, "category": "secret_endpoints_hardcoded"},
         "ndv_dynamic_code_loading": {"tags": {"dynamic_code"}, "category": "ndv_dynamic_code_loading"},
-        "ndv_native_code_loader_suspicious": {
-            "tags": {"dynamic_code"},
-            "category": "ndv_native_code_loader_suspicious",
-        },
         "ndv_remote_command": {"tags": set(), "category": "ndv_remote_command"},
-        "anomaly_root_detection": {"tags": set(), "category": "anomaly_root_detection"},
-        "anomaly_anti_debug": {"tags": set(), "category": "anomaly_anti_debug"},
-        "sec_proxy_setting_modification": {
-            "tags": set(),
-            "category": "sec_proxy_setting_modification",
-        },
     }
     YARA_RULE_CATEGORY = {
         "ANDROID_Remote_Command_MQTT_WS": ("ndv_remote_command", {"network"}),
@@ -653,17 +565,27 @@ class Stage1StaticRunner:
         state: PipelineState,
     ) -> list[CommandResult]:
         results = []
-        results.append(
-            state.progress.run_step(
-                "Decode resources (apktool)",
-                lambda: self._run_tool(
-                    "apktool",
-                    ["apktool", "d", "-f", "-o", str(paths.apktool_dir), str(apk_path)],
-                    paths.logs_dir,
-                    "apktool",
-                ),
-            )
+        if paths.apktool_dir.exists():
+            shutil.rmtree(paths.apktool_dir, ignore_errors=True)
+        apktool_result = state.progress.run_step(
+            "Decode resources (apktool)",
+            lambda: self._run_tool(
+                "apktool",
+                ["apktool", "d", "-f", "-o", str(paths.apktool_dir), str(apk_path)],
+                paths.logs_dir,
+                "apktool",
+            ),
         )
+        if self._log_contains(apktool_result, self.APKTOOL_FLEX_PATTERN):
+            if paths.apktool_dir.exists():
+                shutil.rmtree(paths.apktool_dir, ignore_errors=True)
+            apktool_result = self._run_tool(
+                "apktool",
+                ["apktool", "d", "-f", "-r", "-o", str(paths.apktool_dir), str(apk_path)],
+                paths.logs_dir,
+                "apktool_nores",
+            )
+        results.append(apktool_result)
         results.append(
             state.progress.run_step(
                 "Decompile code (jadx)",
@@ -883,10 +805,10 @@ class Stage1StaticRunner:
         apk_path: Path,
     ) -> CommandResult:
         rules_path = self.yara_rules_path
+        _ = apk_path
         stdout_path = logs_dir / "yara.stdout.txt"
         stderr_path = logs_dir / "yara.stderr.txt"
-        list_path = logs_dir / "yara_scanlist.txt"
-        argv = ["yara", str(rules_path), "--scan-list", str(list_path)]
+        argv = ["yara", "-r", "-s", str(rules_path)]
         if not rules_path or not rules_path.is_file():
             stdout_path.write_text("", encoding="utf-8")
             stderr_path.write_text(
@@ -903,7 +825,23 @@ class Stage1StaticRunner:
                 stderr_path=str(stderr_path),
                 error="rules_not_found",
             )
-        self._write_yara_scan_list(list_path, apktool_dir, jadx_dir, apk_path)
+        targets = []
+        for path in (apktool_dir, jadx_dir):
+            if path.exists():
+                targets.append(str(path))
+        if not targets:
+            stdout_path.write_text("", encoding="utf-8")
+            stderr_path.write_text("", encoding="utf-8")
+            return CommandResult(
+                tool="yara",
+                argv=argv,
+                cwd=str(logs_dir.parent),
+                return_code=0,
+                duration_sec=0.0,
+                stdout_path=str(stdout_path),
+                stderr_path=str(stderr_path),
+            )
+        argv.extend(targets)
         return self._run_tool("yara", argv, logs_dir, "yara")
 
     def _write_yara_scan_list(
@@ -1040,8 +978,6 @@ class Stage1StaticRunner:
             if len(parts) != 4:
                 continue
             file_path, line_str, column_str, match = parts
-            if category == "secret_endpoints_hardcoded" and "schemas.android.com" in match:
-                continue
             try:
                 line_num = int(line_str)
                 col_num = int(column_str)
@@ -1087,23 +1023,48 @@ class Stage1StaticRunner:
         findings: list[Finding] = []
         results = []
         total_files = len(so_files)
-        for index, so_file in enumerate(so_files, start=1):
-            label = f"strings_{index}"
-            progress_label = f"Strings ({index}/{total_files}): {so_file.name}"
-            result = run_step(
-                progress_label,
-                lambda so_file=so_file, label=label: self._run_tool(
-                    "strings",
-                    ["strings", "-a", "-n", "6", str(so_file)],
-                    logs_dir,
-                    label,
-                ),
-            )
-            results.append(result)
-            output_path = Path(result.stdout_path)
-            if not output_path.exists():
-                continue
-            findings.extend(self._scan_strings_output(output_path, patterns, so_file, run_dir))
+        if not so_files:
+            return findings, results
+        scan_path = run_dir / "artifacts" / "strings_so_scan.txt"
+        hits_path = run_dir / "artifacts" / "strings_so_rg_hits.txt"
+        scan_path.parent.mkdir(parents=True, exist_ok=True)
+        with scan_path.open("w", encoding="utf-8") as scan_handle, hits_path.open(
+            "w", encoding="utf-8"
+        ) as hits_handle:
+            for index, so_file in enumerate(so_files, start=1):
+                label = f"strings_{index}"
+                progress_label = f"Strings ({index}/{total_files}): {so_file.name}"
+                result = run_step(
+                    progress_label,
+                    lambda so_file=so_file, label=label: self._run_tool(
+                        "strings",
+                        ["strings", "-a", "-n", "8", str(so_file)],
+                        logs_dir,
+                        label,
+                    ),
+                )
+                results.append(result)
+                output_path = Path(result.stdout_path)
+                if not output_path.exists():
+                    continue
+                try:
+                    content = output_path.read_text(encoding="utf-8", errors="replace")
+                except (OSError, UnicodeError):
+                    content = ""
+                if content:
+                    scan_handle.write(f"### {so_file}\n")
+                    scan_handle.write(content)
+                    if not content.endswith("\n"):
+                        scan_handle.write("\n")
+                findings.extend(
+                    self._scan_strings_output(
+                        output_path,
+                        patterns,
+                        so_file,
+                        run_dir,
+                        hits_handle=hits_handle,
+                    )
+                )
         return findings, results
 
     def _scan_strings_output(
@@ -1112,6 +1073,7 @@ class Stage1StaticRunner:
         patterns: dict[str, re.Pattern],
         so_file: Path,
         run_dir: Path,
+        hits_handle: TextIO | None = None,
     ) -> list[Finding]:
         findings: list[Finding] = []
         for line_num, line in enumerate(
@@ -1122,8 +1084,8 @@ class Stage1StaticRunner:
                 match = regex.search(line)
                 if not match:
                     continue
-                if category == "secret_endpoints_hardcoded" and "schemas.android.com" in match.group(0):
-                    continue
+                if hits_handle is not None:
+                    hits_handle.write(f"{so_file}:{line_num}:{match.group(0)}\n")
                 meta = self.STRINGS_CATEGORY_META.get(category, {"tags": set(), "category": category})
                 normalized_category = meta["category"]
                 findings.append(

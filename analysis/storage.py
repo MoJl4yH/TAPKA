@@ -6,6 +6,9 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
+from analysis.runtime.clock import now_utc_iso
+from analysis.runtime.context import RunContext
+from analysis.stages import STAGE_CROSS_TOOL
 from models import ApkMeta, Project, Run, Finding
 
 class Storage:
@@ -306,3 +309,25 @@ class Storage:
                 continue
             return run, run_dir
         return None
+
+    def get_or_create_stage3_run(self, project_id: str) -> RunContext:
+        project_dir = self.get_project_dir(project_id)
+        version_dir = self.get_active_version_dir(project_id)
+        runs_dir = version_dir / "runs"
+        self._ensure_dir(runs_dir)
+        suffix = f"_{STAGE_CROSS_TOOL}"
+        run_dirs = [path for path in runs_dir.iterdir() if path.is_dir() and path.name.endswith(suffix)]
+        run_dirs.sort(key=lambda path: path.name, reverse=True)
+        apk_path = self.get_apk_path(project_id)
+        if run_dirs:
+            return RunContext.from_run_dir(project_dir, apk_path, "stage3", run_dirs[0])
+        run_id = self.generate_run_id(STAGE_CROSS_TOOL)
+        run_dir = runs_dir / run_id
+        return RunContext(
+            project_dir=project_dir,
+            apk_path=apk_path,
+            stage="stage3",
+            run_id=run_id,
+            run_dir=run_dir,
+            started_at=now_utc_iso(),
+        )

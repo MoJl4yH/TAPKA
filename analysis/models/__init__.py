@@ -7,6 +7,7 @@ from analysis.models.mobsf import (
     MobSFReport,
     MobSFStaticSummary,
 )
+from analysis.models.quark import QuarkReport, QuarkSummary, QuarkRuleResult
 
 __all__ = [
     "MobSFArtifacts",
@@ -16,4 +17,7 @@ __all__ = [
     "MobSFIosSummary",
     "MobSFReport",
     "MobSFStaticSummary",
+    "QuarkReport",
+    "QuarkSummary",
+    "QuarkRuleResult",
 ]

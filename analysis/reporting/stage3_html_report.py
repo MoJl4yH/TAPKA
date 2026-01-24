@@ -234,6 +234,9 @@ class Stage3HtmlRenderer:
     <h2>MobSF findings</h2>
     {self._render_appsec_findings(static)}
 
+    <h2>Quark analysis</h2>
+    {self._render_quark(report.quark, report.run.run_dir)}
+
     <h2>Static analysis artifacts</h2>
     <div class="card">
       {self._render_artifacts(mobsf.artifacts.static if mobsf else {}, report.run.run_dir)}
@@ -264,6 +267,17 @@ class Stage3HtmlRenderer:
           hidden.style.display = 'block';
         }}
         showOtherFindings.style.display = 'none';
+      }});
+    }}
+
+    const showAllQuark = document.getElementById('showAllQuark');
+    if (showAllQuark) {{
+      showAllQuark.addEventListener('click', () => {{
+        const hidden = document.getElementById('quarkMore');
+        if (hidden) {{
+          hidden.style.display = 'block';
+        }}
+        showAllQuark.style.display = 'none';
       }});
     }}
   </script>
@@ -384,6 +398,57 @@ class Stage3HtmlRenderer:
             )
         return "".join(rows)
 
+    def _render_quark(self, quark, run_dir: str | None) -> str:
+        if not quark:
+            return '<div class="card muted">No Quark data.</div>'
+        summary = quark.summary
+        rows = [
+            ("Status", quark.status),
+            ("Rules dir", quark.rules_dir or "N/A"),
+            ("Rules total", str(summary.rules_total)),
+            ("Matched", str(summary.rules_matched)),
+            ("Failed", str(summary.rules_failed)),
+        ]
+        matches = summary.matches or []
+        table = self._render_quark_table(matches[:10], run_dir)
+        extra = ""
+        if len(matches) > 10:
+            extra = (
+                '<button id="showAllQuark" class="ghost-btn">Show all matches</button>'
+                f'<div id="quarkMore" style="display:none;">{self._render_quark_table(matches[10:], run_dir)}</div>'
+            )
+        return f"""
+        <div class="card">
+          {self._render_table(rows)}
+          <div class="muted">Matched rules</div>
+          {table}
+          {extra}
+        </div>
+        """
+
+    def _render_quark_table(self, matches: list, run_dir: str | None) -> str:
+        if not matches:
+            return "<p class=\"muted\">No matches.</p>"
+        body_rows = []
+        for match in matches:
+            output_path = match.output_path or "-"
+            if run_dir and output_path and output_path != "-":
+                output_path = str(Path(run_dir) / output_path)
+            body_rows.append(
+                "<tr>"
+                f"<td>{html.escape(match.rule_name)}</td>"
+                f"<td>{html.escape(match.rule_path)}</td>"
+                f"<td>{html.escape(output_path)}</td>"
+                "</tr>"
+            )
+        return (
+            "<table><thead><tr>"
+            "<th>Rule</th><th>Path</th><th>Output</th>"
+            "</tr></thead><tbody>"
+            + "".join(body_rows)
+            + "</tbody></table>"
+        )
+
     def _render_dynamic_android(self, mobsf: MobSFReport | None, run_dir: str | None) -> str:
         if not mobsf or not mobsf.dynamic_android.enabled:
             return '<div class="card muted">Not configured.</div>'
@@ -418,6 +483,12 @@ class Stage3HtmlRenderer:
         <h2>Notes</h2>
         <div class="card"><ul>{items}</ul></div>
         """
+
+    def _render_table(self, rows: list[tuple[str, str]]) -> str:
+        body = "".join(
+            f"<tr><th>{html.escape(label)}</th><td>{html.escape(value)}</td></tr>" for label, value in rows
+        )
+        return f"<table>{body}</table>"
 
     def _render_artifacts(self, artifacts: dict[str, str], run_dir: str | None) -> str:
         if not artifacts:

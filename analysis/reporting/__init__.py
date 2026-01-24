@@ -216,9 +216,15 @@ class ReportManager:
         html_path.write_text(Stage1HtmlRenderer().render(report), encoding="utf-8")
         return json_path, html_path
 
-    def generate_stage3(self, run: Run, run_dir: Path, mobsf_report) -> tuple[Path, Path]:
+    def generate_stage3(
+        self,
+        run: Run,
+        run_dir: Path,
+        mobsf_report,
+        quark_report=None,
+    ) -> tuple[Path, Path]:
         project = self.storage.load_project(run.project_id)
-        report = self._build_stage3_report(project, run, run_dir, mobsf_report)
+        report = self._build_stage3_report(project, run, run_dir, mobsf_report, quark_report)
         json_path, html_path = self.report_paths(run_dir, STAGE_CROSS_TOOL)
         json_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
         html_path.write_text(Stage3HtmlRenderer().render(report), encoding="utf-8")
@@ -401,6 +407,7 @@ class ReportManager:
         run: Run,
         run_dir: Path,
         mobsf_report,
+        quark_report,
     ) -> Stage3ReportModel:
         now = datetime.now().isoformat(timespec="seconds")
         apk_path = self.storage.get_apk_path(project.project_id)
@@ -430,9 +437,22 @@ class ReportManager:
             run_dir=str(run_dir),
         )
         status = "ok" if run.status == "Done" else "fail"
-        tool_statuses = [
-            ToolStatus(tool="MobSF", status=status, details="MobSF REST API")
-        ]
+        tool_statuses = []
+        mobsf_status = "not_implemented"
+        if mobsf_report is not None:
+            mobsf_status = "ok" if run.status == "Done" else "fail"
+        tool_statuses.append(ToolStatus(tool="MobSF", status=mobsf_status, details="MobSF REST API"))
+        quark_status = "not_implemented"
+        if quark_report is not None:
+            if quark_report.status == "ok":
+                quark_status = "ok"
+            elif quark_report.status in ("missing", "missing_rules"):
+                quark_status = "fail"
+            elif quark_report.status == "skipped":
+                quark_status = "not_implemented"
+            else:
+                quark_status = "partial"
+        tool_statuses.append(ToolStatus(tool="Quark", status=quark_status, details="Quark rules"))
         artifacts = self._collect_artifacts(run_dir)
         notes = list(run.errors) if run.errors else []
         return Stage3ReportModel(
@@ -446,6 +466,7 @@ class ReportManager:
             status=status,
             notes=notes,
             mobsf=mobsf_report,
+            quark=quark_report,
         )
 
     def _write_stub(
@@ -637,6 +658,9 @@ class ReportManager:
         mobsf_path = artifacts_dir / "mobsf"
         if mobsf_path.exists():
             paths.append(str(mobsf_path.relative_to(run_dir)) + "/")
+        quark_path = artifacts_dir / "quark"
+        if quark_path.exists():
+            paths.append(str(quark_path.relative_to(run_dir)) + "/")
         return paths
 
     def _parse_package_info(self, run_dir: Path) -> dict[str, str]:

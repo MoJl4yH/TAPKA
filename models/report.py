@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 from models.finding import Finding
 from analysis.models.mobsf import MobSFReport
+from analysis.models.quark import QuarkReport
 
 ReportStatus = Literal["ok", "partial", "fail", "not_implemented"]
 
@@ -66,6 +67,7 @@ class Stage2ReportModel(BaseReportModel):
 
 class Stage3ReportModel(BaseReportModel):
     mobsf: MobSFReport | None = None
+    quark: QuarkReport | None = None
     status: ReportStatus = "not_implemented"
 
 
