@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -68,7 +69,12 @@ class Stage3ApkidRunner:
                 include_types=self.config.apkid_include_types,
             )
             runner = ApkidRunner(config=config, on_progress=log)
-            runner.run(ctx, apk_path)
+            tool_index = runner.run(ctx, apk_path)
+            tool_result_path = self._tool_result_path(run_dir, tool_index, "apkid")
+            tool_ok, exit_code = self._read_tool_ok(tool_result_path)
+            if not tool_ok:
+                suffix = f" (exit_code={exit_code})" if exit_code is not None else ""
+                raise RuntimeError(f"APKiD analysis failed{suffix}.")
 
             run.status = "Done"
             run.finished_at = datetime.now().isoformat(timespec="seconds")
@@ -106,3 +112,24 @@ class Stage3ApkidRunner:
     def _emit(self, message: str) -> None:
         if self.on_progress:
             self.on_progress(message)
+
+    def _tool_result_path(self, run_dir: Path, tool_index: dict[str, str], tool_name: str) -> Path:
+        rel_path = tool_index.get("tool_result")
+        if rel_path:
+            return run_dir / rel_path
+        return run_dir / "tools" / tool_name / "tool_result.json"
+
+    def _read_tool_ok(self, path: Path) -> tuple[bool, int | None]:
+        if not path.exists():
+            return False, None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError, ValueError):
+            return False, None
+        ok = payload.get("ok")
+        exit_code = payload.get("exit_code")
+        if isinstance(ok, bool):
+            return ok, exit_code if isinstance(exit_code, int) else None
+        if isinstance(exit_code, int):
+            return exit_code == 0, exit_code
+        return False, None

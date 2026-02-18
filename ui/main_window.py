@@ -2021,6 +2021,24 @@ class MainWindow(QMainWindow):
         if not self.current_project:
             return
         stage = self._resolved_run_stage()
+        if stage == STAGE_CROSS_TOOL:
+            latest_stage3 = self._find_latest_stage3_run()
+            self.current_run = None
+            self.current_run_dir = latest_stage3[0] if latest_stage3 else None
+            if not latest_stage3:
+                self.project_run_label.setText("-")
+                self.status_badge.setText("Idle")
+                self._clear_run_views()
+                self._load_stage3_run_views()
+                return
+            _, run_data = latest_stage3
+            finished_at = run_data.get("finished_at")
+            started_at = run_data.get("started_at")
+            self.project_run_label.setText(finished_at or started_at or "-")
+            self.status_badge.setText("Done" if finished_at else "Running")
+            self._clear_run_views()
+            self._load_stage3_run_views()
+            return
         latest = self.storage.get_latest_run(self.current_project.project_id, stage)
         if not latest:
             self.current_run = None

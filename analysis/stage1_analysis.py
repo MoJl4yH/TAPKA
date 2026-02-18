@@ -1643,9 +1643,9 @@ class Stage1StaticRunner:
                 )
             )
 
-        v1 = self._parse_apksigner_bool(text, "v1")
-        v2 = self._parse_apksigner_bool(text, "v2")
-        v3 = self._parse_apksigner_bool(text, "v3")
+        v1 = self._parse_apksigner_bool(text, "1")
+        v2 = self._parse_apksigner_bool(text, "2")
+        v3 = self._parse_apksigner_bool(text, "3")
         if target_sdk is not None and target_sdk >= 24 and v1 and not v2 and not v3:
             findings.append(
                 self._make_finding(

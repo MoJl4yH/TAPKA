@@ -158,7 +158,15 @@ class QuarkRunner:
             except OSError:
                 output_json_artifact = self._relpath(ctx.run_dir, output_json_path)
 
-        report.status = "ok"
+        if return_code == 0:
+            report.status = "ok"
+        else:
+            report.status = "fail"
+            reason = f"quark exited with code {return_code}"
+            stderr_first = (stderr or "").strip().splitlines()
+            if stderr_first:
+                reason = f"{reason}: {stderr_first[0]}"
+            report.errors.append(reason)
         report.summary = QuarkSummary(
             rules_total=0,
             rules_matched=0,
