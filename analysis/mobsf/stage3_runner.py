@@ -16,12 +16,16 @@ from analysis.quark import QuarkConfig, QuarkRunner
 from analysis.runtime.clock import now_utc_iso
 from analysis.runtime.context import RunContext
 from analysis.normalize.stage3 import normalize_stage3
+from analysis.stage3_common import (
+    append_run_error,
+    build_stage3_logger,
+    emit_progress,
+    ensure_apk_ready,
+    finalize_stage3_run,
+    prepare_stage3_run,
+)
 from analysis.runtime.fs import (
     clear_tool_dir,
-    ensure_run_dir,
-    ensure_run_json,
-    write_json,
-    write_run_finished,
     write_tool_bundle,
 )
 from analysis.models.mobsf import (
@@ -37,7 +41,6 @@ from analysis.models.mobsf import (
 from analysis.models.quark import QuarkReport
 from analysis.reporting import ReportManager
 from analysis.settings import load_settings
-from analysis.stages import STAGE_CROSS_TOOL
 from analysis.storage import Storage
 from models import Run
 
@@ -73,19 +76,7 @@ class Stage3MobSFRunner:
         self.on_progress = on_progress
 
     def run(self, project_id: str, ctx: RunContext | None = None) -> Run:
-        if ctx is None:
-            ctx = self.storage.get_or_create_stage3_run(project_id)
-        run_dir = ctx.run_dir
-        apk_path = Path(ctx.apk_path)
-        run = Run(
-            run_id=ctx.run_id,
-            project_id=project_id,
-            stage=STAGE_CROSS_TOOL,
-            started_at=ctx.started_at,
-            apk_path=str(apk_path),
-        )
-        ensure_run_dir(ctx)
-        ensure_run_json(ctx)
+        ctx, run_dir, apk_path, run = prepare_stage3_run(self.storage, project_id, ctx)
         tools_index = ctx.meta.setdefault("tools_index", [])
         tools_index[:] = [entry for entry in tools_index if entry.get("tool") != "mobsf"]
         clear_tool_dir(ctx, "mobsf")
@@ -96,7 +87,7 @@ class Stage3MobSFRunner:
         mobsf_stderr = ""
         mobsf_written = False
         log_path = run_dir / "logs" / "stage3_mobsf.txt"
-        log = self._build_logger(log_path)
+        log = build_stage3_logger(log_path, self.on_progress)
         artifacts_root = run_dir / "artifacts" / "mobsf"
         static_dir = artifacts_root / "static"
         dynamic_dir = artifacts_root / "dynamic_android"
@@ -111,7 +102,7 @@ class Stage3MobSFRunner:
 
         start_time = datetime.now().isoformat(timespec="seconds")
         log("Stage3 MobSF run started.")
-        self._emit("Starting MobSF Stage3 analysis...")
+        emit_progress(self.on_progress, "Starting MobSF Stage3 analysis...")
 
         mobsf_report = None
         quark_report = None
@@ -122,10 +113,7 @@ class Stage3MobSFRunner:
             self._emit("Checking MobSF availability...")
             self._check_available(client)
 
-            if not apk_path.exists():
-                raise RuntimeError(f"APK not found: {apk_path}")
-            if apk_path.stat().st_size == 0:
-                raise RuntimeError(f"APK is empty: {apk_path}")
+            ensure_apk_ready(apk_path)
             apk_display_name = self._resolve_apk_display_name(project_id, apk_path)
             self._validate_upload_file(apk_path, apk_display_name, log)
 
@@ -141,30 +129,20 @@ class Stage3MobSFRunner:
                 log,
             )
             mobsf_finished_at = now_utc_iso()
-            mobsf_artifacts: dict[str, str] = {}
-            for name, path in (
-                ("artifacts_dir", artifacts_root),
-                ("static_dir", static_dir),
-                ("dynamic_dir", dynamic_dir),
-                ("ios_dir", ios_dir),
-                ("trace_dir", trace_dir),
-            ):
-                if path.exists():
-                    relpath = os.path.relpath(path, ctx.run_dir)
-                    if path.is_dir():
-                        relpath += "/"
-                    mobsf_artifacts[name] = relpath
             tools_index.append(
-                write_tool_bundle(
+                self._record_mobsf_tool_result(
                     ctx,
-                    "mobsf",
                     mobsf_cmd,
                     mobsf_started_at,
                     mobsf_finished_at,
                     mobsf_exit_code,
                     mobsf_stdout,
                     mobsf_stderr,
-                    mobsf_artifacts,
+                    artifacts_root,
+                    static_dir,
+                    dynamic_dir,
+                    ios_dir,
+                    trace_dir,
                 )
             )
             mobsf_written = True
@@ -175,8 +153,6 @@ class Stage3MobSFRunner:
             run.finished_at = datetime.now().isoformat(timespec="seconds")
 
             mobsf_report = self._build_report(
-                run,
-                run_dir,
                 base_url,
                 start_time,
                 static_summary,
@@ -186,7 +162,7 @@ class Stage3MobSFRunner:
             )
 
             report_manager = ReportManager(self.storage)
-            json_path, html_path = report_manager.generate_stage3(run, run_dir, mobsf_report, quark_report)
+            _, html_path = report_manager.generate_stage3(run, run_dir, mobsf_report, quark_report)
             run.report_path = str(html_path)
             log("Stage3 MobSF run completed.")
             return run
@@ -194,45 +170,93 @@ class Stage3MobSFRunner:
             log(f"Stage3 MobSF run failed: {exc}")
             run.status = "Error"
             run.finished_at = datetime.now().isoformat(timespec="seconds")
-            run.errors.append(f"Stage3 MobSF failed: {exc}")
-            report = self._build_error_report(run, run_dir, start_time, str(exc))
+            append_run_error(run, f"Stage3 MobSF failed: {exc}")
+            report = self._build_error_report(start_time)
             report_manager = ReportManager(self.storage)
             report_manager.generate_stage3(run, run_dir, report, None)
             mobsf_exit_code = 1
             mobsf_stderr = str(exc)
             if not mobsf_written:
                 mobsf_finished_at = now_utc_iso()
-                mobsf_artifacts: dict[str, str] = {}
-                for name, path in (
-                    ("artifacts_dir", artifacts_root),
-                    ("static_dir", static_dir),
-                    ("dynamic_dir", dynamic_dir),
-                    ("ios_dir", ios_dir),
-                    ("trace_dir", trace_dir),
-                ):
-                    if path.exists():
-                        relpath = os.path.relpath(path, ctx.run_dir)
-                        if path.is_dir():
-                            relpath += "/"
-                        mobsf_artifacts[name] = relpath
                 tools_index.append(
-                    write_tool_bundle(
+                    self._record_mobsf_tool_result(
                         ctx,
-                        "mobsf",
                         mobsf_cmd,
                         mobsf_started_at,
                         mobsf_finished_at,
                         mobsf_exit_code,
                         mobsf_stdout,
                         mobsf_stderr,
-                        mobsf_artifacts,
+                        artifacts_root,
+                        static_dir,
+                        dynamic_dir,
+                        ios_dir,
+                        trace_dir,
                     )
                 )
             raise
         finally:
             indicators = normalize_stage3(ctx, mobsf_report, quark_report)
-            write_json(ctx.run_dir / "normalized" / "indicators.json", indicators)
-            write_run_finished(ctx, now_utc_iso(), tools_index)
+            finalize_stage3_run(ctx, indicators)
+
+    def _record_mobsf_tool_result(
+        self,
+        ctx: RunContext,
+        cmd: list[str],
+        started_at: str,
+        finished_at: str,
+        exit_code: int,
+        stdout: str,
+        stderr: str,
+        artifacts_root: Path,
+        static_dir: Path,
+        dynamic_dir: Path,
+        ios_dir: Path,
+        trace_dir: Path,
+    ) -> dict[str, str]:
+        artifacts = self._collect_mobsf_artifacts(
+            ctx,
+            artifacts_root,
+            static_dir,
+            dynamic_dir,
+            ios_dir,
+            trace_dir,
+        )
+        return write_tool_bundle(
+            ctx,
+            "mobsf",
+            cmd,
+            started_at,
+            finished_at,
+            exit_code,
+            stdout,
+            stderr,
+            artifacts,
+        )
+
+    def _collect_mobsf_artifacts(
+        self,
+        ctx: RunContext,
+        artifacts_root: Path,
+        static_dir: Path,
+        dynamic_dir: Path,
+        ios_dir: Path,
+        trace_dir: Path,
+    ) -> dict[str, str]:
+        artifacts: dict[str, str] = {}
+        for name, path in (
+            ("artifacts_dir", artifacts_root),
+            ("static_dir", static_dir),
+            ("dynamic_dir", dynamic_dir),
+            ("ios_dir", ios_dir),
+            ("trace_dir", trace_dir),
+        ):
+            if path.exists():
+                relpath = os.path.relpath(path, ctx.run_dir)
+                if path.is_dir():
+                    relpath += "/"
+                artifacts[name] = relpath
+        return artifacts
 
     def _run_pipeline(
         self,
@@ -250,6 +274,10 @@ class Stage3MobSFRunner:
         static_summary = MobSFStaticSummary()
         dynamic_summary = MobSFDynamicAndroidSummary(enabled=self.config.enable_dynamic_android)
         ios_summary = MobSFIosSummary(enabled=self.config.enable_ios, status="Not configured")
+        static_artifacts = dict(artifacts.static) if isinstance(artifacts.static, dict) else {}
+        dynamic_android_artifacts = (
+            dict(artifacts.dynamic_android) if isinstance(artifacts.dynamic_android, dict) else {}
+        )
 
         self._emit("Uploading APK to MobSF...")
         upload_resp = self._call_and_save_json(
@@ -263,7 +291,7 @@ class Stage3MobSFRunner:
         scan_type = upload_data.get("scan_type")
         static_summary.scan_hash = scan_hash
         static_summary.scan_type = scan_type
-        artifacts.static["upload"] = self._relpath(run_dir, static_dir / "upload.json")
+        static_artifacts["upload"] = self._relpath(run_dir, static_dir / "upload.json")
 
         if not scan_hash:
             raise RuntimeError("MobSF upload did not return a scan hash.")
@@ -276,7 +304,7 @@ class Stage3MobSFRunner:
             trace_dir,
             "static_scan",
         )
-        artifacts.static["scan"] = self._relpath(run_dir, static_dir / "scan.json")
+        static_artifacts["scan"] = self._relpath(run_dir, static_dir / "scan.json")
 
         self._emit("Fetching MobSF scan logs...")
         scan_logs_resp = self._call_and_save_text(
@@ -288,7 +316,7 @@ class Stage3MobSFRunner:
         scan_status = self._scan_status_from_logs(scan_logs_resp.json_data)
         if scan_status:
             self._emit_scan_status(scan_status)
-        artifacts.static["scan_logs"] = self._relpath(run_dir, static_dir / "scan_logs.txt")
+        static_artifacts["scan_logs"] = self._relpath(run_dir, static_dir / "scan_logs.txt")
 
         self._emit("Fetching MobSF static report JSON...")
         report_resp = self._call_and_save_json(
@@ -297,7 +325,7 @@ class Stage3MobSFRunner:
             trace_dir,
             "static_report_json",
         )
-        artifacts.static["report_json"] = self._relpath(run_dir, static_dir / "report.json")
+        static_artifacts["report_json"] = self._relpath(run_dir, static_dir / "report.json")
         static_summary = self._extract_static_summary(report_resp.json_data, static_summary)
         self._emit_scan_status("Scan completed")
 
@@ -308,7 +336,7 @@ class Stage3MobSFRunner:
             trace_dir,
             "static_scorecard",
         )
-        artifacts.static["scorecard"] = self._relpath(run_dir, static_dir / "scorecard.json")
+        static_artifacts["scorecard"] = self._relpath(run_dir, static_dir / "scorecard.json")
         static_summary.scorecard = scorecard_resp.json_data or {}
 
         if self.config.download_pdf:
@@ -322,7 +350,7 @@ class Stage3MobSFRunner:
                     f"MobSF API error (HTTP {pdf_response.status_code}) during PDF download: {snippet}"
                 )
             self._write_binary(pdf_path, pdf_response.content)
-            artifacts.static["report_pdf"] = self._relpath(run_dir, pdf_path)
+            static_artifacts["report_pdf"] = self._relpath(run_dir, pdf_path)
 
         if self.config.view_source and self.config.view_source_files:
             view_dir = static_dir / "view_source"
@@ -335,7 +363,7 @@ class Stage3MobSFRunner:
                     trace_dir,
                     f"static_view_source_{self._safe_name(file_path)}",
                 )
-            artifacts.static["view_source"] = self._relpath(run_dir, view_dir)
+            static_artifacts["view_source"] = self._relpath(run_dir, view_dir)
         elif self.config.view_source:
             log("View source enabled but no files configured.")
 
@@ -349,7 +377,7 @@ class Stage3MobSFRunner:
                 run_dir,
                 dynamic_summary,
             )
-            artifacts.dynamic_android.update(dynamic_artifacts)
+            dynamic_android_artifacts.update(dynamic_artifacts)
 
         if self.config.cleanup_scans:
             self._emit("Cleaning up MobSF scan...")
@@ -359,7 +387,10 @@ class Stage3MobSFRunner:
                 trace_dir,
                 "static_delete_scan",
             )
-            artifacts.static["delete_scan"] = self._relpath(run_dir, static_dir / "delete_scan.json")
+            static_artifacts["delete_scan"] = self._relpath(run_dir, static_dir / "delete_scan.json")
+
+        artifacts.static = static_artifacts
+        artifacts.dynamic_android = dynamic_android_artifacts
 
         return static_summary, dynamic_summary, ios_summary, artifacts
 
@@ -486,7 +517,7 @@ class Stage3MobSFRunner:
     ) -> QuarkReport:
         if not self.config.enable_quark:
             report = QuarkReport(status="skipped")
-            report.errors.append("Quark analysis disabled.")
+            self._append_quark_error(report, "Quark analysis disabled.")
             return report
         self._emit("Running Quark rules...")
         rules_dir = Path(self.config.quark_rules_dir) if self.config.quark_rules_dir else None
@@ -505,8 +536,6 @@ class Stage3MobSFRunner:
 
     def _build_report(
         self,
-        run: Run,
-        run_dir: Path,
         base_url: str,
         started_at: str,
         static_summary: MobSFStaticSummary,
@@ -514,20 +543,8 @@ class Stage3MobSFRunner:
         ios_summary: MobSFIosSummary,
         artifacts: MobSFArtifacts,
     ) -> MobSFReport:
-        instance = MobSFInstanceInfo(
-            base_url=base_url,
-            started_at=started_at,
-            finished_at=datetime.now().isoformat(timespec="seconds"),
-        )
-        features = MobSFFeatureFlags(
-            enable_dynamic_android=self.config.enable_dynamic_android,
-            enable_ios=self.config.enable_ios,
-            cleanup_scans=self.config.cleanup_scans,
-            download_pdf=self.config.download_pdf,
-            view_source=self.config.view_source,
-            frida_steps=self.config.frida_steps,
-            tls_tests=self.config.tls_tests,
-        )
+        instance = self._build_instance(base_url, started_at)
+        features = self._build_feature_flags()
         return MobSFReport(
             instance=instance,
             features=features,
@@ -537,21 +554,9 @@ class Stage3MobSFRunner:
             ios=ios_summary,
         )
 
-    def _build_error_report(self, run: Run, run_dir: Path, started_at: str, error: str) -> MobSFReport:
-        instance = MobSFInstanceInfo(
-            base_url=normalize_base_url(DEFAULT_MOBSF_URL),
-            started_at=started_at,
-            finished_at=datetime.now().isoformat(timespec="seconds"),
-        )
-        features = MobSFFeatureFlags(
-            enable_dynamic_android=self.config.enable_dynamic_android,
-            enable_ios=self.config.enable_ios,
-            cleanup_scans=self.config.cleanup_scans,
-            download_pdf=self.config.download_pdf,
-            view_source=self.config.view_source,
-            frida_steps=self.config.frida_steps,
-            tls_tests=self.config.tls_tests,
-        )
+    def _build_error_report(self, started_at: str) -> MobSFReport:
+        instance = self._build_instance(normalize_base_url(DEFAULT_MOBSF_URL), started_at)
+        features = self._build_feature_flags()
         static_summary = MobSFStaticSummary()
         dynamic_summary = MobSFDynamicAndroidSummary(enabled=self.config.enable_dynamic_android)
         ios_summary = MobSFIosSummary(enabled=self.config.enable_ios, status="Not configured")
@@ -563,6 +568,24 @@ class Stage3MobSFRunner:
             static=static_summary,
             dynamic_android=dynamic_summary,
             ios=ios_summary,
+        )
+
+    def _build_instance(self, base_url: str, started_at: str) -> MobSFInstanceInfo:
+        return MobSFInstanceInfo(
+            base_url=base_url,
+            started_at=started_at,
+            finished_at=datetime.now().isoformat(timespec="seconds"),
+        )
+
+    def _build_feature_flags(self) -> MobSFFeatureFlags:
+        return MobSFFeatureFlags(
+            enable_dynamic_android=self.config.enable_dynamic_android,
+            enable_ios=self.config.enable_ios,
+            cleanup_scans=self.config.cleanup_scans,
+            download_pdf=self.config.download_pdf,
+            view_source=self.config.view_source,
+            frida_steps=self.config.frida_steps,
+            tls_tests=self.config.tls_tests,
         )
 
     def _check_available(self, client: MobSFClient) -> None:
@@ -617,22 +640,18 @@ class Stage3MobSFRunner:
         trace_dir: Path,
         trace_name: str,
     ) -> MobSFResponse:
-        try:
-            response = func()
-        except requests.RequestException as exc:
-            self._write_trace(trace_dir, trace_name, 0, note=str(exc))
-            raise MobSFClientError(f"MobSF request failed: {exc}") from exc
-        self._write_trace(trace_dir, trace_name, response.status_code, response.text)
-        self._write_text(path, response.text)
-        if response.status_code >= 400:
-            snippet = self._short_text(response.text)
-            raise MobSFClientError(
-                f"MobSF API error (HTTP {response.status_code}): {snippet}",
-                response=response,
-            )
-        return response
+        return self._call_and_save_response(func, path, trace_dir, trace_name)
 
     def _call_and_save_text(
+        self,
+        func: Callable[[], MobSFResponse],
+        path: Path,
+        trace_dir: Path,
+        trace_name: str,
+    ) -> MobSFResponse:
+        return self._call_and_save_response(func, path, trace_dir, trace_name)
+
+    def _call_and_save_response(
         self,
         func: Callable[[], MobSFResponse],
         path: Path,
@@ -684,21 +703,14 @@ class Stage3MobSFRunner:
     def _write_binary(self, path: Path, content: bytes) -> None:
         path.write_bytes(content)
 
-    def _build_logger(self, path: Path) -> Callable[[str], None]:
-        def _log(message: str) -> None:
-            timestamp = datetime.now().strftime("%H:%M:%S")
-            line = f"[{timestamp}] {message}"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as handle:
-                handle.write(line + "\n")
-            if self.on_progress:
-                self.on_progress(line)
-
-        return _log
-
     def _emit(self, message: str) -> None:
-        if self.on_progress:
-            self.on_progress(message)
+        emit_progress(self.on_progress, message)
+
+    def _append_quark_error(self, report: QuarkReport, message: str) -> None:
+        errors = report.errors if isinstance(report.errors, list) else []
+        errors = [str(item) for item in errors]
+        errors.append(message)
+        report.errors = errors
 
     def _emit_scan_status(self, status: str) -> None:
         if not self.on_progress:

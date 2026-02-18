@@ -6,7 +6,7 @@ import traceback
 from pathlib import Path
 from datetime import datetime
 import re
-import xml.etree.ElementTree as ET
+from typing import Callable
 
 from PySide6.QtCore import Qt, QUrl, QThread, Signal, QTimer
 from PySide6.QtGui import QDesktopServices, QPixmap, QIcon
@@ -50,9 +50,9 @@ from analysis.apkid.stage3_runner import Stage3ApkidConfig, Stage3ApkidRunner
 from analysis.apkleaks.stage3_runner import Stage3ApkleaksConfig, Stage3ApkleaksRunner
 from analysis.quark.stage3_runner import Stage3QuarkConfig, Stage3QuarkRunner
 from analysis.reporting import ReportManager
-from analysis.reporting.stage3_html_report import Stage3HtmlRenderer
+from analysis.reporting.stage3_html_report import render_report_html
 from models import Project, Run, CommandResult
-from models.report import Stage3ReportModel
+from models.report_v2 import ReportV2
 from ui.style import get_style
 
 
@@ -265,12 +265,6 @@ class MainWindow(QMainWindow):
         self.progress_label: QLabel | None = None
         self.progress_bar: QProgressBar | None = None
         self.status_badge: QLabel | None = None
-        self.metric_permissions: QLabel | None = None
-        self.metric_exported: QLabel | None = None
-        self.metric_endpoints: QLabel | None = None
-        self.metric_secrets: QLabel | None = None
-        self.metric_jadx: QLabel | None = None
-        self.metric_updated: QLabel | None = None
         self.severity_filter: QComboBox | None = None
         self.category_filter: QComboBox | None = None
         self.findings_search: QLineEdit | None = None
@@ -285,6 +279,7 @@ class MainWindow(QMainWindow):
         self.artifacts_open_button: QPushButton | None = None
         self.artifacts_reveal_button: QPushButton | None = None
         self.artifacts_table: QTableWidget | None = None
+
         self.mobsf_worker: MobSFSetupWorker | None = None
         self.mobsf_stop_worker: MobSFStopWorker | None = None
         self.mobsf_run_worker: Stage3Worker | None = None
@@ -327,6 +322,7 @@ class MainWindow(QMainWindow):
         self.apkid_run_button: QPushButton | None = None
         self.stage3_mode_combo: QComboBox | None = None
         self.stage3_stack: QStackedWidget | None = None
+        self.stage3_tabs: QTabWidget | None = None
         self.mobsf_progress_label: QLabel | None = None
         self.mobsf_progress_bar: QProgressBar | None = None
         self.quark_progress_label: QLabel | None = None
@@ -338,6 +334,7 @@ class MainWindow(QMainWindow):
         self.apkid_summary_updated: QLabel | None = None
         self.apkid_log_view: QPlainTextEdit | None = None
         self.apkid_open_dir_button: QPushButton | None = None
+        self.apkid_report_button: QPushButton | None = None
         self.apkleaks_progress_label: QLabel | None = None
         self.apkleaks_progress_bar: QProgressBar | None = None
         self.apkleaks_status_label: QLabel | None = None
@@ -346,12 +343,7 @@ class MainWindow(QMainWindow):
         self.apkleaks_summary_label: QLabel | None = None
         self.apkleaks_summary_updated: QLabel | None = None
         self.apkleaks_open_dir_button: QPushButton | None = None
-        self.stage3_tabs: QTabWidget | None = None
-        self.stage3_run_dir: Path | None = None
-        self.stage3_run_data: dict | None = None
-        self.stage3_findings: list[dict] = []
-        self.stage3_log_paths: dict[str, Path] = {}
-        self.stage3_artifact_paths: list[Path] = []
+        self.apkleaks_report_button: QPushButton | None = None
         self.stage3_metric_updated: QLabel | None = None
         self.stage3_metric_tools: QLabel | None = None
         self.stage3_metric_findings: QLabel | None = None
@@ -372,6 +364,10 @@ class MainWindow(QMainWindow):
         self.stage3_artifacts_open_button: QPushButton | None = None
         self.stage3_artifacts_reveal_button: QPushButton | None = None
         self.stage3_artifacts_table: QTableWidget | None = None
+        self.stage3_findings: list[dict] = []
+        self.stage3_log_paths: dict[str, Path] = {}
+        self.stage3_run_dir: Path | None = None
+        self.stage3_run_data: dict | None = None
 
         self.setWindowTitle("TAPKA — Tools for APK analysis")
         self.setMinimumSize(1100, 720)
@@ -585,10 +581,9 @@ class MainWindow(QMainWindow):
         stage1_layout = QVBoxLayout(stage1_page)
         stage1_layout.setContentsMargins(0, 0, 0, 0)
         stage1_layout.setSpacing(12)
-        stage1_layout.addWidget(self._build_actions_card())
-        stage1_layout.addWidget(self._build_progress_card())
+        stage1_layout.addWidget(self._build_stage1_controls_card())
         stage1_layout.addWidget(self._build_checks_card())
-        stage1_layout.addWidget(self._build_stage1_log_card(), stretch=1)
+        stage1_layout.addStretch(1)
         return stage1_page
 
     def _build_stage3_page(self) -> QWidget:
@@ -653,14 +648,20 @@ class MainWindow(QMainWindow):
         header.setObjectName("sectionTitle")
         card_layout.addWidget(header)
 
+        hint = QLabel("Run APKiD signatures on the selected APK and collect detector matches.")
+        hint.setObjectName("muted")
+        hint.setWordWrap(True)
+        card_layout.addWidget(hint)
+
         button_row = QHBoxLayout()
         self.apkid_run_button = QPushButton("Run APKiD")
+        self.apkid_run_button.setObjectName("primaryButton")
         self.apkid_run_button.clicked.connect(self._run_apkid_analysis)
         button_row.addWidget(self.apkid_run_button)
 
-        apkid_report_button = QPushButton("Open report")
-        apkid_report_button.clicked.connect(self._open_apkid_report_stub)
-        button_row.addWidget(apkid_report_button)
+        self.apkid_report_button = QPushButton("Open report")
+        self.apkid_report_button.clicked.connect(self._open_apkid_report_stub)
+        button_row.addWidget(self.apkid_report_button)
 
         button_row.addStretch()
         card_layout.addLayout(button_row)
@@ -697,6 +698,7 @@ class MainWindow(QMainWindow):
         self.apkid_log_view = QPlainTextEdit()
         self.apkid_log_view.setReadOnly(True)
         self.apkid_log_view.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.apkid_log_view.setMaximumBlockCount(200)
         self.apkid_log_view.setPlaceholderText("APKiD logs will appear here.")
         card_layout.addWidget(self.apkid_log_view)
 
@@ -724,22 +726,20 @@ class MainWindow(QMainWindow):
         header.setObjectName("sectionTitle")
         card_layout.addWidget(header)
 
-        status_row = QHBoxLayout()
-        status_label = QLabel("Status:")
-        self.apkleaks_status_label = QLabel("Ready")
-        self.apkleaks_status_label.setObjectName("muted")
-        status_row.addWidget(status_label)
-        status_row.addWidget(self.apkleaks_status_label, stretch=1)
-        card_layout.addLayout(status_row)
+        hint = QLabel("Run APKLeaks patterns on the selected APK and capture extracted entries.")
+        hint.setObjectName("muted")
+        hint.setWordWrap(True)
+        card_layout.addWidget(hint)
 
         button_row = QHBoxLayout()
         self.apkleaks_run_button = QPushButton("Run APKLeaks")
+        self.apkleaks_run_button.setObjectName("primaryButton")
         self.apkleaks_run_button.clicked.connect(self._run_apkleaks_analysis)
         button_row.addWidget(self.apkleaks_run_button)
 
-        apkleaks_report_button = QPushButton("Open report")
-        apkleaks_report_button.clicked.connect(self._open_apkleaks_report_stub)
-        button_row.addWidget(apkleaks_report_button)
+        self.apkleaks_report_button = QPushButton("Open report")
+        self.apkleaks_report_button.clicked.connect(self._open_apkleaks_report_stub)
+        button_row.addWidget(self.apkleaks_report_button)
 
         button_row.addStretch()
         card_layout.addLayout(button_row)
@@ -747,6 +747,9 @@ class MainWindow(QMainWindow):
         summary_form = QFormLayout()
         summary_form.setHorizontalSpacing(16)
         summary_form.setVerticalSpacing(6)
+        self.apkleaks_status_label = QLabel("Ready")
+        self.apkleaks_status_label.setObjectName("muted")
+        summary_form.addRow("Status:", self.apkleaks_status_label)
         self.apkleaks_summary_label = QLabel("-")
         self.apkleaks_summary_label.setObjectName("muted")
         summary_form.addRow("Entries:", self.apkleaks_summary_label)
@@ -773,6 +776,7 @@ class MainWindow(QMainWindow):
         self.apkleaks_log_view = QPlainTextEdit()
         self.apkleaks_log_view.setReadOnly(True)
         self.apkleaks_log_view.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.apkleaks_log_view.setMaximumBlockCount(200)
         self.apkleaks_log_view.setPlaceholderText("APKLeaks logs will appear here.")
         card_layout.addWidget(self.apkleaks_log_view)
 
@@ -927,6 +931,7 @@ class MainWindow(QMainWindow):
 
         button_row = QHBoxLayout()
         self.quark_run_button = QPushButton("Run Quark")
+        self.quark_run_button.setObjectName("primaryButton")
         self.quark_run_button.clicked.connect(self._run_quark_analysis)
         button_row.addWidget(self.quark_run_button)
 
@@ -1039,49 +1044,59 @@ class MainWindow(QMainWindow):
         layout.addStretch()
         return page
 
-    def _build_actions_card(self) -> QFrame:
-        actions_card = QFrame()
-        actions_card.setObjectName("card")
-        actions_layout = QHBoxLayout(actions_card)
-        actions_layout.setContentsMargins(16, 12, 16, 12)
-        actions_layout.setSpacing(10)
+    def _build_stage1_controls_card(self) -> QFrame:
+        card = QFrame()
+        card.setObjectName("card")
+        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(10)
 
+        header = QLabel("Static analysis")
+        header.setObjectName("sectionTitle")
+        layout.addWidget(header)
+
+        hint = QLabel("Run local static tools and generate reports for the selected APK.")
+        hint.setObjectName("muted")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        button_row = QHBoxLayout()
+        button_row.setSpacing(10)
         self.run_analysis_button = QPushButton("Run analysis")
         self.run_analysis_button.setObjectName("primaryButton")
         self.run_analysis_button.clicked.connect(self._run_analysis)
-        actions_layout.addWidget(self.run_analysis_button)
+        button_row.addWidget(self.run_analysis_button)
 
         self.open_report_button = QPushButton("Open report")
         self.open_report_button.clicked.connect(self._open_report)
-        actions_layout.addWidget(self.open_report_button)
+        button_row.addWidget(self.open_report_button)
 
         self.generate_report_button = QPushButton("Generate report")
         self.generate_report_button.clicked.connect(self._generate_report)
-        actions_layout.addWidget(self.generate_report_button)
+        button_row.addWidget(self.generate_report_button)
+        button_row.addStretch(1)
+        layout.addLayout(button_row)
 
-        self.open_analysis_dir_button = QPushButton("Open analysis directory")
-        self.open_analysis_dir_button.clicked.connect(self._open_stage1_run_dir)
-        actions_layout.addWidget(self.open_analysis_dir_button)
-
-        actions_layout.addStretch()
-        return actions_card
-
-    def _build_progress_card(self) -> QFrame:
-        progress_card = QFrame()
-        progress_card.setObjectName("card")
-        progress_layout = QHBoxLayout(progress_card)
-        progress_layout.setContentsMargins(16, 10, 16, 10)
-
+        status_row = QHBoxLayout()
+        status_title = QLabel("Status:")
+        status_title.setObjectName("sectionTitle")
+        status_row.addWidget(status_title)
         self.progress_label = QLabel("Ready")
         self.progress_label.setObjectName("muted")
-        progress_layout.addWidget(self.progress_label, stretch=1)
+        status_row.addWidget(self.progress_label, stretch=1)
+        layout.addLayout(status_row)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setMinimum(0)
         self.progress_bar.setMaximum(1)
         self.progress_bar.setValue(0)
-        progress_layout.addWidget(self.progress_bar, stretch=2)
-        return progress_card
+        layout.addWidget(self.progress_bar)
+
+        self.open_analysis_dir_button = QPushButton("Open analysis directory")
+        self.open_analysis_dir_button.clicked.connect(self._open_stage1_run_dir)
+        layout.addWidget(self.open_analysis_dir_button)
+        return card
 
     def _build_stage3_actions_card(self) -> QFrame:
         actions_card = QFrame()
@@ -1287,7 +1302,7 @@ class MainWindow(QMainWindow):
             status_button.setProperty("status", "pending")
             status_button.setFlat(True)
             status_button.setCursor(Qt.ArrowCursor)
-            status_button.clicked.connect(lambda checked=False, tool=tool: self._open_tool_stderr(tool))
+            status_button.clicked.connect(lambda _checked=False, tool=tool: self._open_tool_stderr(tool))
             status_layout.addRow(f"{label}:", status_button)
             self.tool_status_buttons[tool] = status_button
         checks_layout.addLayout(status_layout)
@@ -1311,26 +1326,6 @@ class MainWindow(QMainWindow):
         self.log_view.setPlaceholderText("Stage1 logs will appear here.")
         layout.addWidget(self.log_view)
         return card
-    def _build_overview_tab(self) -> None:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(12)
-
-        metrics_grid = QGridLayout()
-        metrics_grid.setHorizontalSpacing(12)
-        metrics_grid.setVerticalSpacing(12)
-
-        self.metric_permissions = self._add_metric_card(metrics_grid, 0, 0, "Permissions")
-        self.metric_exported = self._add_metric_card(metrics_grid, 0, 1, "Exported components")
-        self.metric_endpoints = self._add_metric_card(metrics_grid, 0, 2, "Endpoints")
-        self.metric_secrets = self._add_metric_card(metrics_grid, 1, 0, "Secrets hits")
-        self.metric_jadx = self._add_metric_card(metrics_grid, 1, 1, "Jadx status")
-        self.metric_updated = self._add_metric_card(metrics_grid, 1, 2, "Last analysis")
-
-        layout.addLayout(metrics_grid)
-        layout.addStretch()
-        self.tabs.addTab(tab, "Overview")
 
     def _add_metric_card(self, grid: QGridLayout, row: int, col: int, title: str) -> QLabel:
         card = QFrame()
@@ -2097,8 +2092,6 @@ class MainWindow(QMainWindow):
 
     def _clear_run_views(self) -> None:
         self.findings = []
-        if self.metric_permissions:
-            self._update_overview_metrics()
         if self.findings_table:
             self._populate_findings_table([])
         if self.log_view:
@@ -2112,8 +2105,6 @@ class MainWindow(QMainWindow):
             self._clear_run_views()
             return
         self.findings = self._load_findings()
-        if self.metric_permissions:
-            self._update_overview_metrics()
         if self.findings_table:
             self._apply_findings_filters()
         if self.log_view:
@@ -2181,41 +2172,6 @@ class MainWindow(QMainWindow):
         self._update_apkid_summary()
         self._update_apkleaks_summary()
 
-    def _update_overview_metrics(self) -> None:
-        labels = [
-            self.metric_permissions,
-            self.metric_exported,
-            self.metric_endpoints,
-            self.metric_secrets,
-            self.metric_jadx,
-            self.metric_updated,
-        ]
-        if any(label is None for label in labels):
-            return
-        permissions, exported = self._manifest_metrics()
-        endpoints = sum(
-            1
-            for item in self.findings
-            if item["category"] in ("secret_endpoints_hardcoded", "url")
-        )
-        secrets = sum(
-            1
-            for item in self.findings
-            if (
-                item["category"].startswith("secret_")
-                and item["category"] != "secret_endpoints_hardcoded"
-            )
-            or item["category"] in ("sensitive_kv", "jwt")
-        )
-        jadx_status = self._tool_status("jadx")
-        last_run = self.current_run.finished_at if self.current_run else "-"
-
-        self.metric_permissions.setText(str(permissions) if permissions is not None else "-")
-        self.metric_exported.setText(str(exported) if exported is not None else "-")
-        self.metric_endpoints.setText(str(endpoints))
-        self.metric_secrets.setText(str(secrets))
-        self.metric_jadx.setText(jadx_status)
-        self.metric_updated.setText(last_run or "-")
 
     def _update_stage3_overview_metrics(self) -> None:
         labels = [
@@ -2319,43 +2275,85 @@ class MainWindow(QMainWindow):
         except (json.JSONDecodeError, OSError):
             self._update_quark_rules_status()
             return
-        mobsf = data.get("mobsf") or {}
-        static = mobsf.get("static") or {}
-        score = static.get("security_score")
-        if isinstance(score, (int, float)):
-            self.mobsf_summary_score.setText(f"{int(score)}/100")
-        appsec_summary = static.get("appsec_summary") or {}
-        high = appsec_summary.get("high")
-        warning = appsec_summary.get("warning")
-        if isinstance(high, int):
-            self.mobsf_summary_high.setText(str(high))
-        elif isinstance(static.get("appsec_high"), list):
-            self.mobsf_summary_high.setText(str(len(static.get("appsec_high", []))))
-        if isinstance(warning, int):
-            self.mobsf_summary_warning.setText(str(warning))
-        elif isinstance(static.get("appsec_warning"), list):
-            self.mobsf_summary_warning.setText(str(len(static.get("appsec_warning", []))))
-        trackers_detected = static.get("trackers_detected")
-        trackers_total = static.get("trackers_total")
-        if isinstance(trackers_detected, int) and isinstance(trackers_total, int):
-            self.mobsf_summary_trackers.setText(f"{trackers_detected}/{trackers_total}")
-        elif isinstance(trackers_total, int):
-            self.mobsf_summary_trackers.setText(str(trackers_total))
-        report_finished = (data.get("run") or {}).get("finished_at")
-        if isinstance(report_finished, str) and report_finished:
-            self.mobsf_summary_updated.setText(report_finished)
-        elif finished:
-            self.mobsf_summary_updated.setText(finished)
-
-        quark = data.get("quark") or {}
-        summary = quark.get("summary") or {}
-        if self.quark_summary_total and isinstance(summary.get("rules_total"), int):
-            self.quark_summary_total.setText(str(summary.get("rules_total")))
-        if self.quark_summary_matched and isinstance(summary.get("rules_matched"), int):
-            self.quark_summary_matched.setText(str(summary.get("rules_matched")))
-        if self.quark_summary_updated and finished:
-            self.quark_summary_updated.setText(finished)
-        self._update_quark_rules_status(quark.get("rules_dir"))
+        if data.get("schema") == "tapka.report.v2":
+            tools_list = data.get("tools") or []
+            findings_list = data.get("findings") or []
+            mobsf_tool = next((t for t in tools_list if t.get("tool") == "mobsf"), None)
+            if mobsf_tool:
+                metrics = mobsf_tool.get("metrics") or {}
+                score = metrics.get("security_score")
+                if isinstance(score, (int, float)):
+                    self.mobsf_summary_score.setText(f"{int(score)}/100")
+                tool_finished = mobsf_tool.get("finished_at")
+                if isinstance(tool_finished, str) and tool_finished:
+                    self.mobsf_summary_updated.setText(tool_finished)
+                elif finished:
+                    self.mobsf_summary_updated.setText(finished)
+                high_count = sum(
+                    1 for f in findings_list
+                    if f.get("severity") == "high"
+                    and any(s.get("tool") == "mobsf" for s in (f.get("sources") or []))
+                )
+                med_count = sum(
+                    1 for f in findings_list
+                    if f.get("severity") == "medium"
+                    and any(s.get("tool") == "mobsf" for s in (f.get("sources") or []))
+                )
+                self.mobsf_summary_high.setText(str(high_count))
+                self.mobsf_summary_warning.setText(str(med_count))
+            quark_tool = next((t for t in tools_list if t.get("tool") == "quark"), None)
+            if quark_tool:
+                metrics = quark_tool.get("metrics") or {}
+                rules_total = metrics.get("rules_total")
+                rules_matched = metrics.get("rules_matched")
+                if self.quark_summary_total and isinstance(rules_total, int):
+                    self.quark_summary_total.setText(str(rules_total))
+                if self.quark_summary_matched and isinstance(rules_matched, int):
+                    self.quark_summary_matched.setText(str(rules_matched))
+                tool_finished = quark_tool.get("finished_at")
+                if self.quark_summary_updated:
+                    if isinstance(tool_finished, str) and tool_finished:
+                        self.quark_summary_updated.setText(tool_finished)
+                    elif finished:
+                        self.quark_summary_updated.setText(finished)
+            self._update_quark_rules_status()
+        else:
+            mobsf = data.get("mobsf") or {}
+            static = mobsf.get("static") or {}
+            score = static.get("security_score")
+            if isinstance(score, (int, float)):
+                self.mobsf_summary_score.setText(f"{int(score)}/100")
+            appsec_summary = static.get("appsec_summary") or {}
+            high = appsec_summary.get("high")
+            warning = appsec_summary.get("warning")
+            if isinstance(high, int):
+                self.mobsf_summary_high.setText(str(high))
+            elif isinstance(static.get("appsec_high"), list):
+                self.mobsf_summary_high.setText(str(len(static.get("appsec_high", []))))
+            if isinstance(warning, int):
+                self.mobsf_summary_warning.setText(str(warning))
+            elif isinstance(static.get("appsec_warning"), list):
+                self.mobsf_summary_warning.setText(str(len(static.get("appsec_warning", []))))
+            trackers_detected = static.get("trackers_detected")
+            trackers_total = static.get("trackers_total")
+            if isinstance(trackers_detected, int) and isinstance(trackers_total, int):
+                self.mobsf_summary_trackers.setText(f"{trackers_detected}/{trackers_total}")
+            elif isinstance(trackers_total, int):
+                self.mobsf_summary_trackers.setText(str(trackers_total))
+            report_finished = (data.get("run") or {}).get("finished_at")
+            if isinstance(report_finished, str) and report_finished:
+                self.mobsf_summary_updated.setText(report_finished)
+            elif finished:
+                self.mobsf_summary_updated.setText(finished)
+            quark = data.get("quark") or {}
+            summary = quark.get("summary") or {}
+            if self.quark_summary_total and isinstance(summary.get("rules_total"), int):
+                self.quark_summary_total.setText(str(summary.get("rules_total")))
+            if self.quark_summary_matched and isinstance(summary.get("rules_matched"), int):
+                self.quark_summary_matched.setText(str(summary.get("rules_matched")))
+            if self.quark_summary_updated and finished:
+                self.quark_summary_updated.setText(finished)
+            self._update_quark_rules_status(quark.get("rules_dir"))
 
     def _update_apkid_summary(self) -> None:
         labels = [
@@ -2475,42 +2473,7 @@ class MainWindow(QMainWindow):
         self.quark_status_label.setText(status)
         self.quark_rules_label.setText(f"{rule_count} rules")
 
-    def _manifest_metrics(self) -> tuple[int | None, int | None]:
-        if not self.current_run_dir:
-            return None, None
-        manifest_path = self.current_run_dir / "artifacts" / "out_apktool" / "AndroidManifest.xml"
-        if not manifest_path.exists():
-            return None, None
-        try:
-            tree = ET.parse(manifest_path)
-            root = tree.getroot()
-        except (ET.ParseError, OSError):
-            return None, None
-
-        ns = "{http://schemas.android.com/apk/res/android}"
-        permissions = set()
-        for perm in root.findall("uses-permission") + root.findall("uses-permission-sdk-23"):
-            name = perm.get(f"{ns}name") or perm.get("name")
-            if name:
-                permissions.add(name)
-
-        exported_count = 0
-        application = root.find("application")
-        if application is not None:
-            for tag in ("activity", "activity-alias", "service", "receiver", "provider"):
-                for component in application.findall(tag):
-                    exported = component.get(f"{ns}exported")
-                    if exported is not None:
-                        is_exported = exported.lower() == "true"
-                    else:
-                        has_intent = component.find("intent-filter") is not None
-                        is_exported = has_intent and tag in ("activity", "activity-alias", "service", "receiver")
-                    if is_exported:
-                        exported_count += 1
-
-        return len(permissions), exported_count
-
-    def _create_project(self, checked: bool = False) -> None:
+    def _create_project(self, _checked: bool = False) -> None:
         if self.analysis_running:
             return
         name, ok = QInputDialog.getText(self, "New Project", "Project name:")
@@ -2528,7 +2491,7 @@ class MainWindow(QMainWindow):
         self.refresh_projects()
         self._select_project(project.project_id)
 
-    def _add_apk(self, checked: bool = False) -> None:
+    def _add_apk(self, _checked: bool = False) -> None:
         if self.analysis_running:
             return
         apk_file, _ = QFileDialog.getOpenFileName(self, "Select APK File", "", "APK Files (*.apk)")
@@ -2660,6 +2623,8 @@ class MainWindow(QMainWindow):
     def _focus_logs_tab(self) -> None:
         if self.stage_tabs and self.stage_tabs.currentIndex() != 0:
             self.stage_tabs.setCurrentIndex(0)
+        if self.tabs:
+            self.tabs.setCurrentIndex(1)
         self._render_log_view()
 
     def _on_progress(self, payload: dict) -> None:
@@ -2788,18 +2753,14 @@ class MainWindow(QMainWindow):
             return
         try:
             data = json.loads(json_path.read_text(encoding="utf-8"))
-            report = Stage3ReportModel.model_validate(data)
+            report = ReportV2.model_validate(data)
         except (json.JSONDecodeError, ValueError, OSError) as exc:
             QMessageBox.warning(self, "Stage3 report", str(exc))
             return
-        html_path.write_text(Stage3HtmlRenderer().render(report), encoding="utf-8")
+        html_path.write_text(render_report_html(report), encoding="utf-8")
         if html_path.exists():
             QMessageBox.information(self, "Stage3 report", "Stage3 report generated successfully.")
         self._update_action_states()
-
-    def _clear_selection(self) -> None:
-        self.project_list.clearSelection()
-        self._set_current_project(None)
 
     def _report_paths(self, stage_id: str) -> tuple[Path, Path, Path] | None:
         run_dir = self._resolve_report_run_dir(stage_id)
@@ -2824,13 +2785,6 @@ class MainWindow(QMainWindow):
 
     def _report_available(self) -> bool:
         resolved = self._report_paths(self.current_stage_id)
-        if not resolved:
-            return False
-        _, _, html_path = resolved
-        return html_path.exists()
-
-    def _report_available_for_stage(self, stage_id: str) -> bool:
-        resolved = self._report_paths(stage_id)
         if not resolved:
             return False
         _, _, html_path = resolved
@@ -2889,12 +2843,30 @@ class MainWindow(QMainWindow):
             self.artifacts_open_button.setEnabled(has_run)
         if self.artifacts_reveal_button:
             self.artifacts_reveal_button.setEnabled(has_run)
+        if self.stage3_log_copy_button:
+            self.stage3_log_copy_button.setEnabled(stage3_has_run)
+        if self.stage3_log_save_button:
+            self.stage3_log_save_button.setEnabled(stage3_has_run)
+        if self.stage3_log_open_button:
+            self.stage3_log_open_button.setEnabled(stage3_has_run)
+        if self.stage3_artifacts_open_button:
+            self.stage3_artifacts_open_button.setEnabled(stage3_has_run)
+        if self.stage3_artifacts_reveal_button:
+            self.stage3_artifacts_reveal_button.setEnabled(stage3_has_run)
         if self.open_analysis_dir_button:
             self.open_analysis_dir_button.setEnabled(has_run and on_static_stage and not running)
         if self.apkleaks_run_button:
             self.apkleaks_run_button.setEnabled(has_apk and on_stage3 and not stage3_busy)
         if self.apkid_run_button:
             self.apkid_run_button.setEnabled(has_apk and on_stage3 and not stage3_busy)
+        if self.apkid_report_button:
+            self.apkid_report_button.setEnabled(
+                on_stage3 and not stage3_busy and self._stage3_tool_ok("apkid")
+            )
+        if self.apkleaks_report_button:
+            self.apkleaks_report_button.setEnabled(
+                on_stage3 and not stage3_busy and self._stage3_tool_ok("apkleaks")
+            )
         if self.mobsf_setup_button:
             self.mobsf_setup_button.setEnabled(
                 not self.mobsf_setup_in_progress and not stage3_busy
@@ -3225,6 +3197,18 @@ class MainWindow(QMainWindow):
             name = path.name
             self.log_paths[name] = path
 
+        if self.log_combo:
+            prev = self.log_combo.currentText()
+            self.log_combo.blockSignals(True)
+            self.log_combo.clear()
+            for name in self.log_paths:
+                self.log_combo.addItem(name)
+            if prev and prev in self.log_paths:
+                self.log_combo.setCurrentText(prev)
+            elif "runner.log" in self.log_paths:
+                self.log_combo.setCurrentText("runner.log")
+            self.log_combo.blockSignals(False)
+
         self._render_log_view()
 
     def _ensure_live_logs(self, run_dir: Path) -> None:
@@ -3253,7 +3237,12 @@ class MainWindow(QMainWindow):
         if not self.log_paths:
             self.log_view.setPlainText("")
             return
-        path = self.log_paths.get("runner.log")
+        # Pick selected log file from combo, fall back to runner.log or first available
+        path = None
+        if self.log_combo:
+            path = self.log_paths.get(self.log_combo.currentText())
+        if not path:
+            path = self.log_paths.get("runner.log")
         if not path:
             path = next(iter(self.log_paths.values()), None)
         if not path or not path.exists():
@@ -3263,8 +3252,15 @@ class MainWindow(QMainWindow):
             content = path.read_text(encoding="utf-8", errors="replace")
         except (OSError, UnicodeError):
             content = ""
+        # Apply search filter
+        query = self.log_search.text().strip() if self.log_search else ""
+        if query:
+            lines = [line for line in content.splitlines() if query.lower() in line.lower()]
+            content = "\n".join(lines)
         self.log_view.setPlainText(content)
-        self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
+        autoscroll = self.log_autoscroll.isChecked() if self.log_autoscroll else True
+        if autoscroll:
+            self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
 
     def _load_stage3_logs(self, log_entries: list[tuple[str, Path]] | None = None) -> None:
         if not self.stage3_log_combo:
@@ -3395,10 +3391,24 @@ class MainWindow(QMainWindow):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
 
     def _open_apkid_report_stub(self) -> None:
-        QMessageBox.information(self, "APKiD report", "APKiD report is not available yet.")
+        if not self._stage3_tool_ok("apkid"):
+            QMessageBox.information(
+                self,
+                "APKiD report",
+                "APKiD report is available only after successful analysis.",
+            )
+            return
+        self._open_stage3_report()
 
     def _open_apkleaks_report_stub(self) -> None:
-        QMessageBox.information(self, "APKLeaks report", "APKLeaks report is not available yet.")
+        if not self._stage3_tool_ok("apkleaks"):
+            QMessageBox.information(
+                self,
+                "APKLeaks report",
+                "APKLeaks report is available only after successful analysis.",
+            )
+            return
+        self._open_stage3_report()
 
     def _copy_stage3_log(self) -> None:
         if not self.stage3_log_view:
@@ -3502,7 +3512,6 @@ class MainWindow(QMainWindow):
         if not self.stage3_artifacts_table:
             return
         self.stage3_artifacts_table.setRowCount(0)
-        self.stage3_artifact_paths = []
         if artifact_paths is None:
             artifact_paths = []
             if self.stage3_run_dir:
@@ -3559,21 +3568,6 @@ class MainWindow(QMainWindow):
         if path:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(path).parent)))
 
-    def _tool_status(self, tool: str) -> str:
-        if not self.current_run:
-            return "-"
-        results = [res for res in self.current_run.command_results if res.tool == tool]
-        if not results:
-            return "-"
-        statuses = [self._result_status(tool, res) for res in results]
-        if "fail" in statuses:
-            return "FAIL"
-        if "partial" in statuses:
-            return "PARTIAL"
-        if "success" in statuses:
-            return "SUCCESS"
-        return "-"
-
     def _stage3_tool_status(self, tool_name: str) -> str:
         tool_path = self._stage3_tool_result_path(tool_name)
         if not tool_path or not tool_path.exists():
@@ -3593,6 +3587,16 @@ class MainWindow(QMainWindow):
         if isinstance(exit_code, int):
             status = f"{status} ({exit_code})"
         return status
+
+    def _stage3_tool_ok(self, tool_name: str) -> bool:
+        tool_path = self._stage3_tool_result_path(tool_name)
+        if not tool_path or not tool_path.exists():
+            return False
+        try:
+            data = json.loads(tool_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return False
+        return data.get("ok") is True
 
     def _stage3_tool_result_path(self, tool_name: str) -> Path | None:
         if not self.stage3_run_dir:

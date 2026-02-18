@@ -1,18 +1,23 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Callable
 
 from analysis.apkid.runner import ApkidConfig, ApkidRunner
 from analysis.normalize.stage3 import normalize_stage3
 from analysis.reporting import ReportManager
-from analysis.runtime.clock import now_utc_iso
 from analysis.runtime.context import RunContext
-from analysis.runtime.fs import ensure_run_dir, ensure_run_json, write_json, write_run_finished
-from analysis.stages import STAGE_CROSS_TOOL
+from analysis.stage3_common import (
+    append_run_error,
+    build_stage3_logger,
+    emit_progress,
+    ensure_apk_ready,
+    finalize_stage3_run,
+    prepare_stage3_run,
+    read_tool_ok,
+    resolve_tool_result_path,
+)
 from analysis.storage import Storage
 from models import Run
 
@@ -38,29 +43,13 @@ class Stage3ApkidRunner:
         self.on_progress = on_progress
 
     def run(self, project_id: str, ctx: RunContext | None = None) -> Run:
-        if ctx is None:
-            ctx = self.storage.get_or_create_stage3_run(project_id)
-        run_dir = ctx.run_dir
-        apk_path = Path(ctx.apk_path)
-        run = Run(
-            run_id=ctx.run_id,
-            project_id=project_id,
-            stage=STAGE_CROSS_TOOL,
-            started_at=ctx.started_at,
-            apk_path=str(apk_path),
-        )
-        ensure_run_dir(ctx)
-        ensure_run_json(ctx)
-        log_path = run_dir / "logs" / "stage3_apkid.txt"
-        log = self._build_logger(log_path)
+        ctx, run_dir, apk_path, run = prepare_stage3_run(self.storage, project_id, ctx)
+        log = build_stage3_logger(run_dir / "logs" / "stage3_apkid.txt", self.on_progress)
 
         log("Stage3 APKiD run started.")
-        self._emit("Starting APKiD Stage3 analysis...")
+        emit_progress(self.on_progress, "Starting APKiD Stage3 analysis...")
         try:
-            if not apk_path.exists():
-                raise RuntimeError(f"APK not found: {apk_path}")
-            if apk_path.stat().st_size == 0:
-                raise RuntimeError(f"APK is empty: {apk_path}")
+            ensure_apk_ready(apk_path)
             config = ApkidConfig(
                 timeout_sec=self.config.apkid_timeout_sec,
                 scan_depth=self.config.apkid_scan_depth,
@@ -70,8 +59,8 @@ class Stage3ApkidRunner:
             )
             runner = ApkidRunner(config=config, on_progress=log)
             tool_index = runner.run(ctx, apk_path)
-            tool_result_path = self._tool_result_path(run_dir, tool_index, "apkid")
-            tool_ok, exit_code = self._read_tool_ok(tool_result_path)
+            tool_result_path = resolve_tool_result_path(run_dir, tool_index, "apkid")
+            tool_ok, exit_code = read_tool_ok(tool_result_path)
             if not tool_ok:
                 suffix = f" (exit_code={exit_code})" if exit_code is not None else ""
                 raise RuntimeError(f"APKiD analysis failed{suffix}.")
@@ -87,49 +76,10 @@ class Stage3ApkidRunner:
             log(f"Stage3 APKiD run failed: {exc}")
             run.status = "Error"
             run.finished_at = datetime.now().isoformat(timespec="seconds")
-            run.errors.append(f"Stage3 APKiD failed: {exc}")
+            append_run_error(run, f"Stage3 APKiD failed: {exc}")
             report_manager = ReportManager(self.storage)
             report_manager.generate_stage3(run, run_dir, None, None)
             raise
         finally:
             indicators = normalize_stage3(ctx, None, None)
-            write_json(ctx.run_dir / "normalized" / "indicators.json", indicators)
-            tools_index = ctx.meta.get("tools_index") or []
-            write_run_finished(ctx, now_utc_iso(), tools_index)
-
-    def _build_logger(self, path: Path) -> Callable[[str], None]:
-        def _log(message: str) -> None:
-            timestamp = datetime.now().strftime("%H:%M:%S")
-            line = f"[{timestamp}] {message}"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as handle:
-                handle.write(line + "\n")
-            if self.on_progress:
-                self.on_progress(line)
-
-        return _log
-
-    def _emit(self, message: str) -> None:
-        if self.on_progress:
-            self.on_progress(message)
-
-    def _tool_result_path(self, run_dir: Path, tool_index: dict[str, str], tool_name: str) -> Path:
-        rel_path = tool_index.get("tool_result")
-        if rel_path:
-            return run_dir / rel_path
-        return run_dir / "tools" / tool_name / "tool_result.json"
-
-    def _read_tool_ok(self, path: Path) -> tuple[bool, int | None]:
-        if not path.exists():
-            return False, None
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError, ValueError):
-            return False, None
-        ok = payload.get("ok")
-        exit_code = payload.get("exit_code")
-        if isinstance(ok, bool):
-            return ok, exit_code if isinstance(exit_code, int) else None
-        if isinstance(exit_code, int):
-            return exit_code == 0, exit_code
-        return False, None
+            finalize_stage3_run(ctx, indicators)

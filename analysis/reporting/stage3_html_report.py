@@ -2,13 +2,61 @@ from __future__ import annotations
 
 import base64
 import html
+from collections import Counter
 from pathlib import Path
 
-from analysis.models.mobsf import MobSFReport
-from models.report import Stage3ReportModel
+from analysis.stages import STAGE_CROSS_TOOL, STAGE_DYNAMIC, STAGE_OVERALL, STAGE_STATIC
+from models.report_v2 import FindingV2, ReportV2
 
 
 APP_NAME = "TAPKA"
+TOP_ENDPOINT_URLS = 20
+TOP_ENDPOINT_IPS = 10
+TOP_FINDINGS = 15
+TOP_ARTIFACTS = 40
+
+SIGNING_CATEGORIES = {"supplychain_*"}
+SECRET_CATEGORIES = {"secret_*"}
+VULNERABILITY_CATEGORIES = {"vul_*", "sec_*"}
+NDV_CATEGORIES = {"ndv_*"}
+ANOMALY_CATEGORIES = {"anomaly_*"}
+DYNAMIC_LOAD_CATEGORIES = {
+    "ndv_dynamic_code_loading",
+    "ndv_native_code_loader_suspicious",
+    "ndv_reflection_heavy",
+    "ndv_download_execute",
+}
+SEVERITY_RANK = {"high": 3, "medium": 2, "low": 1, "info": 0}
+
+SECTION_DESCRIPTIONS = {
+    "identification": "Идентификационные сведения об анализируемом APK для обеспечения воспроизводимости результатов.",
+    "signing": "Анализ цифровой подписи APK: применяемые схемы, идентификация подписанта, криптографические характеристики.",
+    "manifest": "Метаданные и декларации приложения: разрешения, экспортируемые компоненты, конфигурационные флаги.",
+    "string_screening": "Поверхностный строковый и сигнатурный скрининг декодированного содержимого APK.",
+    "endpoints": "Обнаруженные обращения к внешним ресурсам (URL, IPv4) в коде и ресурсах приложения.",
+    "secrets": "Потенциально захардкоженные чувствительные данные: ключи, токены, пароли, JWT.",
+    "dynamic_load": "Индикаторы динамической загрузки кода и выполнения команд ОС.",
+    "anti_analysis": "Индикаторы защиты от анализа: проверки эмулятора, root, Frida, отладчика.",
+    "ndv_capabilities": "Потенциально опасные возможности: удалённое управление, перехват, слежка.",
+    "yara_screening": "Результаты сигнатурного скрининга по правилам YARA.",
+    "vulnerabilities": "Уязвимости конфигурации и небезопасные паттерны реализации.",
+    "native_strings": "Строки, извлечённые из нативных библиотек (.so) и проверенные на индикаторы.",
+    "network_activity": "Фактические сетевые соединения приложения, зафиксированные при динамическом анализе.",
+    "install_changes": "Изменения файловой системы и состояния системы после установки APK.",
+    "runtime_behavior": "Поведение приложения при выполнении: сервисы, receivers, ошибки.",
+    "mobsf": "Результаты комплексного анализа MobSF: security score, уязвимости, конфигурации.",
+    "quark": "Результаты поведенческого анализа Quark Engine: сработавшие правила.",
+    "apkid": "Идентификация упаковщиков, обфускаторов и защитных механизмов (APKiD).",
+    "apkleaks": "Потенциальные утечки чувствительных данных и конфигураций (APKLeaks).",
+    "overall_verdict": "Итоговая оценка по двухуровневой шкале методики.",
+}
+
+REPORT_TITLES = {
+    STAGE_STATIC: "Отчёт статического экспертно-инструментального анализа (Этап 1)",
+    STAGE_DYNAMIC: "Отчёт динамического экспертно-инструментального анализа (Этап 2)",
+    STAGE_CROSS_TOOL: "Отчёт кросс-инструментального анализа (Этап 3)",
+    STAGE_OVERALL: "Итоговое экспертное заключение по результатам анализа Android-приложения",
+}
 
 
 def _logo_data_uri() -> str | None:
@@ -19,587 +67,706 @@ def _logo_data_uri() -> str | None:
     return f"data:image/png;base64,{data}"
 
 
-class Stage3HtmlRenderer:
-    def render(self, report: Stage3ReportModel) -> str:
-        mobsf = report.mobsf
-        static = mobsf.static if mobsf else None
-        return f"""
+def _fmt(value) -> str:
+    if value is None:
+        return "-"
+    if isinstance(value, float):
+        return f"{value:.3f}".rstrip("0").rstrip(".")
+    return str(value)
+
+
+def _status_class(status: str | None) -> str:
+    value = (status or "").strip().lower().replace(" ", "_")
+    return value or "unknown"
+
+
+def _severity_class(severity: str | None) -> str:
+    return f"sev-{(severity or 'info').strip().lower()}"
+
+
+def _category_matches(category: str, patterns: set[str]) -> bool:
+    for pattern in patterns:
+        if pattern.endswith("*"):
+            if category.startswith(pattern[:-1]):
+                return True
+            continue
+        if category == pattern:
+            return True
+    return False
+
+
+def _finding_evidence_snippet(finding: FindingV2) -> str:
+    if not finding.evidence:
+        return ""
+    first = finding.evidence[0]
+    return str(first.snippet or first.ref or first.file or "")
+
+
+def _finding_location(finding: FindingV2) -> str:
+    if not finding.evidence:
+        return "-"
+    first = finding.evidence[0]
+    if first.file and first.line:
+        return f"{first.file}:{first.line}"
+    return str(first.file or first.ref or "-")
+
+
+def _section_map(report: ReportV2) -> dict[str, object]:
+    return {section.id: section for section in report.sections}
+
+
+def _sort_findings(findings: list[FindingV2]) -> list[FindingV2]:
+    confidence_rank = {"C3": 3, "C2": 2, "C1": 1}
+    return sorted(
+        findings,
+        key=lambda item: (
+            -SEVERITY_RANK.get(item.severity, 0),
+            -confidence_rank.get(item.confidence, 0),
+            item.category,
+            item.title,
+        ),
+    )
+
+
+def _filter_findings(
+    findings: list[FindingV2],
+    include_patterns: set[str] | None = None,
+    exclude_patterns: set[str] | None = None,
+) -> list[FindingV2]:
+    output: list[FindingV2] = []
+    for finding in findings:
+        category = finding.category or ""
+        if include_patterns and not _category_matches(category, include_patterns):
+            continue
+        if exclude_patterns and _category_matches(category, exclude_patterns):
+            continue
+        output.append(finding)
+    return output
+
+
+def _card(section_id: str, title: str, body_html: str, description: str | None = None) -> tuple[str, str, str]:
+    description_html = f"<p class='muted section-desc'>{html.escape(description)}</p>" if description else ""
+    card_html = (
+        f"<section id='{html.escape(section_id)}' class='card'>"
+        f"<h2>{html.escape(title)}</h2>"
+        f"{description_html}"
+        f"{body_html}"
+        "</section>"
+    )
+    return section_id, title, card_html
+
+
+def _rows_table(
+    headers: list[str],
+    rows: list[list[str]],
+    empty_text: str,
+    table_id: str,
+    limit: int | None = None,
+) -> str:
+    if not rows:
+        colspan = len(headers)
+        return (
+            "<table><thead><tr>"
+            + "".join(f"<th>{html.escape(header)}</th>" for header in headers)
+            + f"</tr></thead><tbody><tr><td colspan='{colspan}' class='muted'>{html.escape(empty_text)}</td></tr></tbody></table>"
+        )
+
+    visible = rows
+    hidden: list[list[str]] = []
+    if isinstance(limit, int) and limit > 0 and len(rows) > limit:
+        visible = rows[:limit]
+        hidden = rows[limit:]
+
+    table = "<table><thead><tr>" + "".join(f"<th>{html.escape(header)}</th>" for header in headers) + "</tr></thead><tbody>"
+    for row in visible:
+        table += "<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>"
+    table += "</tbody>"
+
+    if hidden:
+        table += f"<tbody id='{html.escape(table_id)}-extra' class='hidden'>"
+        for row in hidden:
+            table += "<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>"
+        table += "</tbody>"
+    table += "</table>"
+
+    if hidden:
+        table += (
+            f"<button class='btn-link' onclick=\"tapkaToggle('{html.escape(table_id)}-extra', this)\">"
+            f"Показать все ({len(rows)})</button>"
+        )
+    return table
+
+
+def _artifacts_table(report: ReportV2, limit: int = TOP_ARTIFACTS) -> str:
+    rows: list[list[str]] = []
+    for artifact in report.artifacts:
+        button = (
+            f"<button class='btn-mini' onclick=\"tapkaCopy('{html.escape(artifact.path)}')\">Copy</button>"
+        )
+        rows.append(
+            [
+                html.escape(artifact.kind),
+                html.escape(artifact.name),
+                f"<span class='mono'>{html.escape(artifact.path)}</span>",
+                html.escape(_fmt(artifact.size)),
+                html.escape(_fmt(artifact.mime)),
+                button,
+            ]
+        )
+    return _rows_table(
+        ["Type", "Name", "Path", "Size", "MIME", "Action"],
+        rows,
+        "Артефакты отсутствуют.",
+        "artifacts",
+        limit=limit,
+    )
+
+
+def _tools_table(report: ReportV2, limit: int = 12) -> str:
+    rows: list[list[str]] = []
+    for tool in report.tools:
+        metrics = "<br/>".join(
+            f"<span class='mono'>{html.escape(str(key))}</span>: {html.escape(_fmt(value))}"
+            for key, value in sorted((tool.metrics or {}).items())
+        ) or "-"
+        rows.append(
+            [
+                html.escape(tool.tool),
+                f"<span class='status-{_status_class(tool.status)}'>{html.escape(tool.status)}</span>",
+                html.escape(_fmt(tool.duration_ms)),
+                metrics,
+            ]
+        )
+    return _rows_table(["Tool", "Status", "Duration ms", "Metrics"], rows, "Инструменты не зафиксированы.", "tools", limit)
+
+
+def _identification_table(report: ReportV2) -> str:
+    rows = [
+        ["APK file", html.escape(_fmt(report.project.apk_name))],
+        ["SHA-256", f"<span class='mono'>{html.escape(_fmt(report.project.apk_sha256))}</span>"],
+        ["Size", html.escape(_fmt(report.project.apk_size))],
+        ["Package", html.escape(_fmt(report.project.package_name))],
+        ["Version Name", html.escape(_fmt(report.project.version_name))],
+        ["Version Code", html.escape(_fmt(report.project.version_code))],
+        ["Run ID", html.escape(report.run.run_id)],
+        ["Generated", html.escape(_fmt(report.generated_at))],
+    ]
+    table = "<table><tbody>"
+    for key, value in rows:
+        table += f"<tr><th>{html.escape(key)}</th><td>{value}</td></tr>"
+    table += "</tbody></table>"
+    return table
+
+
+def _severity_summary(report: ReportV2) -> str:
+    counter = Counter(item.severity for item in report.findings)
+    rows = [
+        [f"<span class='{_severity_class(severity)}'>{severity}</span>", html.escape(str(counter.get(severity, 0)))]
+        for severity in ("high", "medium", "low", "info")
+    ]
+    return _rows_table(["Severity", "Count"], rows, "Нет findings.", "severity-summary")
+
+
+def _category_top_table(findings: list[FindingV2], limit: int = 15) -> str:
+    grouped: dict[str, dict] = {}
+    for finding in findings:
+        entry = grouped.setdefault(
+            finding.category,
+            {
+                "count": 0,
+                "severity": "info",
+                "examples": [],
+            },
+        )
+        entry["count"] += 1
+        if SEVERITY_RANK.get(finding.severity, 0) > SEVERITY_RANK.get(entry["severity"], 0):
+            entry["severity"] = finding.severity
+        snippet = _finding_evidence_snippet(finding)
+        if snippet and snippet not in entry["examples"] and len(entry["examples"]) < 2:
+            entry["examples"].append(snippet[:120])
+
+    ordered = sorted(
+        grouped.items(),
+        key=lambda item: (-SEVERITY_RANK.get(item[1]["severity"], 0), -item[1]["count"], item[0]),
+    )
+    rows: list[list[str]] = []
+    for category, payload in ordered:
+        rows.append(
+            [
+                html.escape(category),
+                f"<span class='{_severity_class(payload['severity'])}'>{html.escape(payload['severity'])}</span>",
+                html.escape(str(payload["count"])),
+                "<br/>".join(html.escape(value) for value in payload["examples"]) or "-",
+            ]
+        )
+    return _rows_table(["Category", "Max severity", "Count", "Examples"], rows, "Нет данных по категориям.", "category-top", limit)
+
+
+def _findings_table(findings: list[FindingV2], table_id: str, limit: int = TOP_FINDINGS) -> str:
+    rows: list[list[str]] = []
+    for finding in _sort_findings(findings):
+        rows.append(
+            [
+                f"<span class='{_severity_class(finding.severity)}'>{html.escape(finding.severity)}</span>",
+                html.escape(finding.category),
+                html.escape(finding.title),
+                html.escape(_finding_location(finding)),
+                html.escape(_finding_evidence_snippet(finding)[:160]) or "-",
+            ]
+        )
+    return _rows_table(["Severity", "Category", "Title", "Location", "Evidence"], rows, "Нет findings.", table_id, limit)
+
+
+def _notes_block(report: ReportV2) -> str:
+    if not report.notes:
+        return "<p class='muted'>Примечания отсутствуют.</p>"
+    rows = "".join(f"<li>{html.escape(note)}</li>" for note in report.notes)
+    return f"<ul>{rows}</ul>"
+
+
+def _render_stage1(report: ReportV2) -> list[tuple[str, str, str]]:
+    sections: list[tuple[str, str, str]] = []
+    section_by_id = _section_map(report)
+
+    sections.append(
+        _card(
+            "s1-identification",
+            "1.2 Идентификация объекта анализа",
+            _identification_table(report),
+            SECTION_DESCRIPTIONS["identification"],
+        )
+    )
+
+    sections.append(
+        _card(
+            "s1-tools",
+            "1.3 Статус инструментов",
+            _tools_table(report),
+            "Состояние запусков инструментов и их ключевые метрики по этапу статического анализа.",
+        )
+    )
+
+    signing_section = section_by_id.get("signing_details")
+    signing_payload = signing_section.data if signing_section else {}
+    signing_payload = signing_payload if isinstance(signing_payload, dict) else {}
+    schemes = signing_payload.get("schemes") if isinstance(signing_payload.get("schemes"), dict) else {}
+    cert = signing_payload.get("certificate") if isinstance(signing_payload.get("certificate"), dict) else {}
+    scheme_rows = [[html.escape(name), html.escape(str(value))] for name, value in sorted(schemes.items())]
+    cert_rows = [[html.escape(name), html.escape(_fmt(value))] for name, value in sorted(cert.items())]
+    signing_findings = _filter_findings(report.findings, SIGNING_CATEGORIES)
+    signing_html = ""
+    signing_html += "<h3>Схемы подписи</h3>" + _rows_table(["Scheme", "Enabled"], scheme_rows, "Нет данных.", "sign-schemes")
+    signing_html += "<h3>Сертификат</h3>" + _rows_table(["Field", "Value"], cert_rows, "Нет данных.", "sign-cert")
+    signing_html += "<h3>Проблемы подписи</h3>" + _findings_table(signing_findings, "sign-findings", limit=10)
+    sections.append(_card("s1-signing", "1.4 Анализ подписи APK", signing_html, SECTION_DESCRIPTIONS["signing"]))
+
+    manifest_section = section_by_id.get("manifest")
+    manifest = manifest_section.data if manifest_section else {}
+    manifest = manifest if isinstance(manifest, dict) else {}
+    flags = manifest.get("flags") if isinstance(manifest.get("flags"), list) else []
+    permissions = manifest.get("permissions") if isinstance(manifest.get("permissions"), list) else []
+    exported = manifest.get("exported") if isinstance(manifest.get("exported"), list) else []
+    manifest_html = ""
+    manifest_html += _rows_table(
+        ["Field", "Value"],
+        [
+            ["permissions_total", html.escape(str(len(permissions)))],
+            ["exported_total", html.escape(str(len(exported)))],
+            ["flags_total", html.escape(str(len(flags)))],
+        ],
+        "Нет данных.",
+        "manifest-summary",
+    )
+    manifest_html += "<h3>Флаги</h3>" + _rows_table(["Flag"], [[html.escape(item)] for item in flags], "Нет флагов.", "manifest-flags", 15)
+    manifest_html += "<h3>Разрешения</h3>" + _rows_table(
+        ["Permission"], [[f"<span class='mono'>{html.escape(item)}</span>"] for item in permissions], "Нет разрешений.", "manifest-perm", 20
+    )
+    manifest_html += "<h3>Экспортируемые компоненты</h3>" + _rows_table(
+        ["Component"], [[f"<span class='mono'>{html.escape(item)}</span>"] for item in exported], "Нет экспортируемых компонентов.", "manifest-exp", 15
+    )
+    sections.append(_card("s1-manifest", "1.5 Манифест и конфигурация", manifest_html, SECTION_DESCRIPTIONS["manifest"]))
+
+    urls = [ind for ind in report.indicators if ind.type == "url" and not ind.noise]
+    ips = [ind for ind in report.indicators if ind.type == "ip"]
+    endpoint_url_rows = []
+    for item in urls[:TOP_ENDPOINT_URLS]:
+        example = item.examples[0].file if item.examples else "-"
+        endpoint_url_rows.append([html.escape(item.value), html.escape(str(len(item.examples or []))), html.escape(_fmt(example))])
+    endpoint_ip_rows = []
+    for item in ips[:TOP_ENDPOINT_IPS]:
+        example = item.examples[0].file if item.examples else "-"
+        endpoint_ip_rows.append([html.escape(item.value), html.escape(str(len(item.examples or []))), html.escape(_fmt(example))])
+
+    secrets = _filter_findings(report.findings, SECRET_CATEGORIES)
+    dynamic_load = _filter_findings(report.findings, DYNAMIC_LOAD_CATEGORIES)
+    anti_analysis = _filter_findings(report.findings, ANOMALY_CATEGORIES)
+    ndv_all = _filter_findings(report.findings, NDV_CATEGORIES)
+    ndv_capabilities = [item for item in ndv_all if item.category not in DYNAMIC_LOAD_CATEGORIES]
+    vulnerabilities = _filter_findings(report.findings, VULNERABILITY_CATEGORIES)
+
+    yara_findings = [
+        finding
+        for finding in report.findings
+        if any(source.tool == "yara" or (source.rule and str(source.rule).startswith("yara:")) for source in finding.sources)
+    ]
+
+    string_screening_html = ""
+    string_screening_html += "<h3>1.6.1 Обнаруженные endpoints</h3>"
+    string_screening_html += _rows_table(["URL", "Examples", "First source"], endpoint_url_rows, "URL не обнаружены.", "endpoints-url", TOP_ENDPOINT_URLS)
+    string_screening_html += _rows_table(["IPv4", "Examples", "First source"], endpoint_ip_rows, "IPv4 не обнаружены.", "endpoints-ip", TOP_ENDPOINT_IPS)
+    string_screening_html += "<h3>1.6.2 Потенциальные секреты</h3>" + _findings_table(secrets, "secret-findings", 10)
+    string_screening_html += "<h3>1.6.3 Динамическая загрузка</h3>" + _findings_table(dynamic_load, "dynamic-load-findings", 10)
+    string_screening_html += "<h3>1.6.4 Антианализ</h3>" + _findings_table(anti_analysis, "anti-analysis-findings", 10)
+    string_screening_html += "<h3>1.6.5 Признаки НДВ</h3>" + _findings_table(ndv_capabilities, "ndv-findings", 12)
+    string_screening_html += "<h3>1.6.6 YARA</h3>" + _findings_table(yara_findings, "yara-findings", 10)
+    string_screening_html += "<h3>1.6.7 Уязвимости конфигурации</h3>" + _findings_table(vulnerabilities, "vuln-findings", 15)
+    sections.append(_card("s1-string-screening", "1.6 Строковый и сигнатурный скрининг", string_screening_html, SECTION_DESCRIPTIONS["string_screening"]))
+
+    native_section = section_by_id.get("native_strings")
+    native_payload = native_section.data if native_section else {}
+    native_payload = native_payload if isinstance(native_payload, dict) else {}
+    native_hits = native_payload.get("top_hits") if isinstance(native_payload.get("top_hits"), list) else []
+    native_html = _rows_table(
+        ["Field", "Value"],
+        [
+            [".so files", html.escape(_fmt(native_payload.get("so_files")))],
+            ["Hits", html.escape(_fmt(native_payload.get("hits_total")))],
+        ],
+        "Нет данных.",
+        "native-summary",
+    )
+    native_html += _rows_table(["Top hits"], [[html.escape(hit)] for hit in native_hits], "Совпадений не найдено.", "native-hits", 10)
+    sections.append(_card("s1-native-strings", "1.7 Строки из .so библиотек", native_html, SECTION_DESCRIPTIONS["native_strings"]))
+
+    findings_summary_html = _severity_summary(report) + _category_top_table(report.findings)
+    sections.append(_card("s1-findings-summary", "1.8 Сводка findings", findings_summary_html, "Распределение findings по severity и категориям."))
+
+    sections.append(_card("s1-artifacts", "1.9 Артефакты", _artifacts_table(report), "Компактный перечень файлов и директорий, сформированных при анализе."))
+    sections.append(_card("s1-notes", "1.10 Примечания и ошибки", _notes_block(report), "Служебные сообщения и ошибки этапа."))
+    return sections
+
+
+def _render_stage3(report: ReportV2) -> list[tuple[str, str, str]]:
+    sections: list[tuple[str, str, str]] = []
+    section_by_id = _section_map(report)
+
+    sections.append(
+        _card(
+            "s3-identification",
+            "3.2 Идентификация объекта анализа",
+            _identification_table(report),
+            SECTION_DESCRIPTIONS["identification"],
+        )
+    )
+
+    sections.append(
+        _card(
+            "s3-tools",
+            "3.3 Статус инструментов",
+            _tools_table(report, limit=8),
+            "Сводка запусков MobSF, Quark, APKiD и APKLeaks.",
+        )
+    )
+
+    mobsf_details = section_by_id.get("mobsf_details")
+    mobsf_data = mobsf_details.data if mobsf_details and isinstance(mobsf_details.data, dict) else {}
+    score = mobsf_data.get("security_score")
+    score_class = "score-medium"
+    if isinstance(score, (int, float)):
+        if score >= 70:
+            score_class = "score-good"
+        elif score < 40:
+            score_class = "score-bad"
+    score_html = f"<div class='score-badge {score_class}'>{html.escape(_fmt(score))}/100</div>" if score is not None else "<p class='muted'>Security score не найден.</p>"
+    mobsf_high = mobsf_data.get("appsec_high") if isinstance(mobsf_data.get("appsec_high"), list) else []
+    mobsf_warning = mobsf_data.get("appsec_warning") if isinstance(mobsf_data.get("appsec_warning"), list) else []
+    high_rows = []
+    for item in mobsf_high:
+        if not isinstance(item, dict):
+            continue
+        high_rows.append(
+            [
+                html.escape(_fmt(item.get("title"))),
+                html.escape(_fmt(item.get("section"))),
+                html.escape(_fmt(item.get("description"))),
+            ]
+        )
+    warning_rows = []
+    for item in mobsf_warning:
+        if not isinstance(item, dict):
+            continue
+        warning_rows.append([html.escape(_fmt(item.get("title"))), html.escape(_fmt(item.get("section")))])
+    mobsf_urls = mobsf_data.get("urls_top") if isinstance(mobsf_data.get("urls_top"), list) else []
+    mobsf_domains = mobsf_data.get("domains_top") if isinstance(mobsf_data.get("domains_top"), list) else []
+    mobsf_html = score_html
+    mobsf_html += "<h3>High findings</h3>" + _rows_table(["Title", "Section", "Description"], high_rows, "Нет high findings.", "mobsf-high", 15)
+    mobsf_html += "<h3>Warning findings</h3>" + _rows_table(["Title", "Section"], warning_rows, "Нет warning findings.", "mobsf-warning", 10)
+    mobsf_html += "<h3>Top URL</h3>" + _rows_table(["URL"], [[html.escape(str(value))] for value in mobsf_urls], "URL отсутствуют.", "mobsf-urls", 10)
+    mobsf_html += "<h3>Top domains</h3>" + _rows_table(["Domain"], [[html.escape(str(value))] for value in mobsf_domains], "Домены отсутствуют.", "mobsf-domains", 10)
+    sections.append(_card("s3-mobsf", "3.4 Результаты MobSF", mobsf_html, SECTION_DESCRIPTIONS["mobsf"]))
+
+    quark_details = section_by_id.get("quark_details")
+    quark_data = quark_details.data if quark_details and isinstance(quark_details.data, dict) else {}
+    quark_summary_rows = [
+        ["Rules total", html.escape(_fmt(quark_data.get("rules_total")))],
+        ["Rules matched", html.escape(_fmt(quark_data.get("rules_matched")))],
+        ["Threat level", html.escape(_fmt(quark_data.get("threat_level")))],
+        ["Total score", html.escape(_fmt(quark_data.get("total_score")))],
+    ]
+    crimes = quark_data.get("crimes") if isinstance(quark_data.get("crimes"), list) else []
+    crime_rows = []
+    for item in crimes:
+        if not isinstance(item, dict):
+            continue
+        crime_rows.append(
+            [
+                html.escape(_fmt(item.get("rule"))),
+                html.escape(_fmt(item.get("crime"))),
+                html.escape(_fmt(item.get("score"))),
+                html.escape(", ".join(str(label) for label in item.get("label", []) if isinstance(label, str))),
+            ]
+        )
+    quark_html = _rows_table(["Field", "Value"], quark_summary_rows, "Нет данных.", "quark-summary")
+    quark_html += _rows_table(["Rule", "Crime", "Score", "Labels"], crime_rows, "Срабатываний нет.", "quark-crimes", 15)
+    sections.append(_card("s3-quark", "3.5 Результаты Quark Engine", quark_html, SECTION_DESCRIPTIONS["quark"]))
+
+    apkid_details = section_by_id.get("apkid_details")
+    apkid_data = apkid_details.data if apkid_details and isinstance(apkid_details.data, dict) else {}
+    apkid_rows = []
+    for item in apkid_data.get("matches", []) if isinstance(apkid_data.get("matches"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        apkid_rows.append(
+            [
+                html.escape(_fmt(item.get("file_path"))),
+                html.escape(_fmt(item.get("category"))),
+                html.escape(_fmt(item.get("value"))),
+            ]
+        )
+    apkid_html = _rows_table(
+        ["Filename", "Category", "Value"],
+        apkid_rows,
+        "Защитные механизмы не выявлены.",
+        "apkid-matches",
+        30,
+    )
+    sections.append(_card("s3-apkid", "3.6 Результаты APKiD", apkid_html, SECTION_DESCRIPTIONS["apkid"]))
+
+    apkleaks_details = section_by_id.get("apkleaks_details")
+    apkleaks_data = apkleaks_details.data if apkleaks_details and isinstance(apkleaks_details.data, dict) else {}
+    leak_rows = []
+    for item in apkleaks_data.get("entries", []) if isinstance(apkleaks_data.get("entries"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        leak_rows.append(
+            [
+                html.escape(_fmt(item.get("group"))),
+                html.escape(_fmt(item.get("value"))),
+                html.escape(_fmt(item.get("file_path") or "-")),
+            ]
+        )
+    apkleaks_html = _rows_table(["Type", "Value", "File"], leak_rows, "Утечки не обнаружены.", "apkleaks-entries", 20)
+    sections.append(_card("s3-apkleaks", "3.7 Результаты APKLeaks", apkleaks_html, SECTION_DESCRIPTIONS["apkleaks"]))
+
+    indicator_counter = Counter(ind.type for ind in report.indicators)
+    indicator_rows = [[html.escape(kind), html.escape(str(count))] for kind, count in sorted(indicator_counter.items())]
+    indicators_html = _rows_table(["Kind", "Count"], indicator_rows, "Индикаторы отсутствуют.", "s3-indicators")
+    sections.append(_card("s3-indicators", "3.8 Нормализованные индикаторы", indicators_html, "Агрегированные индикаторы Stage3 по типам."))
+
+    findings_summary_html = _severity_summary(report) + _findings_table(report.findings, "s3-findings", limit=20)
+    findings_summary_html += _artifacts_table(report)
+    findings_summary_html += _notes_block(report)
+    sections.append(_card("s3-summary", "3.9 Сводка findings, артефакты, примечания", findings_summary_html, "Итоговые результаты кросс-инструментального этапа."))
+    return sections
+
+
+def _render_stage2(report: ReportV2) -> list[tuple[str, str, str]]:
+    sections: list[tuple[str, str, str]] = []
+    sections.append(
+        _card(
+            "s2-identification",
+            "2.2 Идентификация объекта анализа",
+            _identification_table(report),
+            SECTION_DESCRIPTIONS["identification"],
+        )
+    )
+    sections.append(_card("s2-environment", "2.3 Параметры среды", "<p class='muted'>Секция готова к заполнению после реализации Stage2 pipeline.</p>", "Параметры эмулятора, ADB и сетевого окружения."))
+    sections.append(_card("s2-tools", "2.4 Статус инструментов", _tools_table(report), "Состояние инструментов динамического анализа."))
+    sections.append(_card("s2-install", "2.5 Изменения при установке", "<p class='muted'>Данные не собраны.</p>", SECTION_DESCRIPTIONS["install_changes"]))
+    sections.append(_card("s2-runtime", "2.6 Поведение при выполнении", "<p class='muted'>Данные не собраны.</p>", SECTION_DESCRIPTIONS["runtime_behavior"]))
+    sections.append(_card("s2-network", "2.7 Сетевая активность", "<p class='muted'>Данные не собраны.</p>", SECTION_DESCRIPTIONS["network_activity"]))
+    sections.append(_card("s2-correlation", "2.8 Сопоставление со Stage1", "<p class='muted'>Данные не собраны.</p>", "Корреляция статических и динамических индикаторов."))
+    summary_html = _severity_summary(report) + _artifacts_table(report) + _notes_block(report)
+    sections.append(_card("s2-summary", "2.9 Сводка findings, артефакты, примечания", summary_html, "Итоги динамического этапа."))
+    return sections
+
+
+def _render_overall(report: ReportV2) -> list[tuple[str, str, str]]:
+    sections: list[tuple[str, str, str]] = []
+    sections.append(
+        _card(
+            "o-identification",
+            "O.2 Идентификация объекта",
+            _identification_table(report),
+            SECTION_DESCRIPTIONS["identification"],
+        )
+    )
+
+    sections.append(_card("o-tools", "O.4 Используемый инструментарий", _tools_table(report, limit=20), "Инструменты, использованные во всех этапах."))
+
+    dedup: dict[str, FindingV2] = {}
+    for finding in report.findings:
+        key = f"{finding.category}|{_finding_evidence_snippet(finding)}"
+        if key not in dedup:
+            dedup[key] = finding
+    unique_findings = list(dedup.values())
+
+    overall_html = _severity_summary(report) + _findings_table(unique_findings, "overall-top-findings", 20)
+    sections.append(_card("o-findings", "O.5 Агрегированная сводка findings", overall_html, "Дедуплицированные findings по category+evidence."))
+
+    ndv_findings = _filter_findings(unique_findings, NDV_CATEGORIES)
+    sections.append(_card("o-ndv", "O.6 Выявленные признаки НДВ", _findings_table(ndv_findings, "overall-ndv", 15), "Категории потенциальных недекларированных возможностей."))
+
+    vulnerabilities = _filter_findings(unique_findings, VULNERABILITY_CATEGORIES)
+    sections.append(_card("o-vuln", "O.7 Выявленные уязвимости", _findings_table(vulnerabilities, "overall-vuln", 20), SECTION_DESCRIPTIONS["vulnerabilities"]))
+
+    secrets = _filter_findings(unique_findings, SECRET_CATEGORIES)
+    sections.append(_card("o-secrets", "O.8 Выявленные секреты", _findings_table(secrets, "overall-secrets", 20), SECTION_DESCRIPTIONS["secrets"]))
+
+    signing = _filter_findings(unique_findings, SIGNING_CATEGORIES)
+    sections.append(_card("o-supply-chain", "O.9 Цепочка поставок", _findings_table(signing, "overall-signing", 15), "Проблемы подписи и сертификатов."))
+
+    high_count = sum(1 for finding in unique_findings if finding.severity == "high")
+    medium_findings = [finding for finding in unique_findings if finding.severity == "medium"]
+    verdict = "Выявлены признаки, требующие дополнительного анализа"
+    reason = "Найдены high/medium findings, требующие экспертной валидации."
+    if high_count == 0 and len(medium_findings) <= 3 and all(item.confidence == "C1" for item in medium_findings):
+        verdict = "Признаки, требующие дополнительного анализа, не выявлены"
+        reason = "High findings отсутствуют, medium findings в пределах порога и с confidence C1."
+    verdict_html = f"<p><strong>{html.escape(verdict)}</strong></p><p class='muted'>{html.escape(reason)}</p>"
+    sections.append(_card("o-verdict", "O.10 Итоговая оценка", verdict_html, SECTION_DESCRIPTIONS["overall_verdict"]))
+
+    summary_html = _artifacts_table(report) + _notes_block(report)
+    sections.append(_card("o-artifacts", "O.11 Артефакты и примечания", summary_html, "Ссылки на итоговые артефакты и служебные заметки."))
+    return sections
+
+
+def _render_header(report: ReportV2) -> str:
+    logo = _logo_data_uri()
+    logo_html = f"<img class='brand-logo' src='{logo}' alt='{APP_NAME} logo'/>" if logo else ""
+    title = REPORT_TITLES.get(report.stage, "TAPKA report")
+    return (
+        "<header class='report-brand'>"
+        f"{logo_html}"
+        "<div>"
+        f"<div class='brand-name'>{html.escape(APP_NAME)}</div>"
+        f"<div class='brand-tagline'>{html.escape(title)}</div>"
+        f"<p class='muted brand-desc'>Schema: {html.escape(report.schema_version)} | Stage: {html.escape(report.stage)}</p>"
+        "</div>"
+        "<div class='header-actions'>"
+        "<button class='btn-link' onclick='window.print()'>Печать / Export PDF</button>"
+        "</div>"
+        "</header>"
+    )
+
+
+def _render_toc(cards: list[tuple[str, str, str]]) -> str:
+    items = "".join(
+        f"<li><a href='#{html.escape(section_id)}'>{html.escape(title)}</a></li>" for section_id, title, _ in cards
+    )
+    return f"<section class='card'><h2>Содержание</h2><ul class='toc'>{items}</ul></section>"
+
+
+def _render_document(report: ReportV2, cards: list[tuple[str, str, str]]) -> str:
+    body = "".join(card_html for _, _, card_html in cards)
+    return f"""
 <!doctype html>
-<html lang="en">
+<html lang="ru">
 <head>
   <meta charset="utf-8"/>
-  <title>TAPKA Stage3 Report</title>
+  <title>{html.escape(APP_NAME)} Report</title>
   <style>
-    body {{
-      margin: 0;
-      font-family: "IBM Plex Sans", "Noto Sans", sans-serif;
-      background: #121417;
-      color: #e6e9ee;
-    }}
-    .container {{
-      padding: 24px;
-    }}
-    .report-brand {{
-      display: flex;
-      gap: 16px;
-      align-items: center;
-      margin-bottom: 18px;
-      padding-bottom: 12px;
-      border-bottom: 1px solid #2b3138;
-    }}
-    .brand-logo {{
-      width: 56px;
-      height: 56px;
-      border-radius: 12px;
-      object-fit: contain;
-      background: #1b1f24;
-      border: 1px solid #2b3138;
-      padding: 6px;
-    }}
-    .brand-name {{
-      font-size: 22px;
-      font-weight: 700;
-      letter-spacing: 0.2px;
-    }}
-    .brand-tagline {{
-      font-size: 13px;
-      color: #9aa3ad;
-      text-transform: uppercase;
-      letter-spacing: 0.12em;
-    }}
-    .brand-desc {{
-      margin: 6px 0 0 0;
-    }}
-    .muted {{
-      color: #9aa3ad;
-    }}
-    .grid {{
-      display: grid;
-      gap: 16px;
-    }}
-    .grid-3 {{
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    }}
-    .card {{
-      background: #1b1f24;
-      border: 1px solid #2b3138;
-      border-radius: 12px;
-      padding: 16px;
-    }}
-    .summary-line {{
-      display: grid;
-      grid-template-columns: 140px minmax(0, 1fr);
-      gap: 12px;
-      margin-bottom: 6px;
-    }}
-    .summary-label {{
-      color: #9aa3ad;
-    }}
-    .summary-value {{
-      display: flex;
-      gap: 8px;
-      align-items: flex-start;
-      min-width: 0;
-    }}
-    .summary-text {{
-      min-width: 0;
-      overflow-wrap: anywhere;
-      word-break: break-word;
-    }}
-    .mono {{
-      font-family: "IBM Plex Mono", "Menlo", monospace;
-    }}
-    .tool-card {{
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }}
-    .tool-status {{
-      font-weight: 600;
-      text-transform: uppercase;
-    }}
+    body {{ margin: 0; font-family: "IBM Plex Sans", "Noto Sans", sans-serif; background: #121417; color: #e6e9ee; }}
+    .container {{ padding: 24px; max-width: 1280px; margin: 0 auto; }}
+    .report-brand {{ display: flex; gap: 16px; align-items: center; margin-bottom: 18px; padding-bottom: 12px; border-bottom: 1px solid #2b3138; }}
+    .brand-logo {{ width: 56px; height: 56px; border-radius: 12px; object-fit: contain; background: #1b1f24; border: 1px solid #2b3138; padding: 6px; }}
+    .brand-name {{ font-size: 22px; font-weight: 700; letter-spacing: 0.2px; }}
+    .brand-tagline {{ font-size: 13px; color: #9aa3ad; text-transform: uppercase; letter-spacing: 0.12em; }}
+    .brand-desc {{ margin: 6px 0 0 0; }}
+    .header-actions {{ margin-left: auto; }}
+    .card {{ background: #1b1f24; border: 1px solid #2b3138; border-radius: 12px; padding: 16px; margin-bottom: 16px; }}
+    .muted {{ color: #9aa3ad; }}
+    .mono {{ font-family: "IBM Plex Mono", "Menlo", monospace; overflow-wrap: anywhere; word-break: break-word; }}
+    .section-desc {{ margin-top: -6px; margin-bottom: 12px; }}
+    table {{ width: 100%; border-collapse: collapse; margin-top: 8px; table-layout: fixed; }}
+    th, td {{ text-align: left; padding: 8px; border-bottom: 1px solid #2b3138; vertical-align: top; min-width: 0; overflow-wrap: anywhere; word-break: break-word; }}
+    th {{ font-size: 12px; text-transform: uppercase; color: #9aa3ad; }}
+    .toc {{ margin: 0; padding-left: 18px; }}
+    .toc a {{ color: #a8c7fa; text-decoration: none; }}
+    .toc a:hover {{ text-decoration: underline; }}
+    .btn-link {{ background: transparent; color: #a8c7fa; border: 1px solid #2b3138; padding: 6px 10px; border-radius: 8px; cursor: pointer; }}
+    .btn-mini {{ background: transparent; color: #a8c7fa; border: 1px solid #2b3138; padding: 2px 8px; border-radius: 8px; cursor: pointer; font-size: 12px; }}
     .status-ok {{ color: #4db7b0; }}
     .status-partial {{ color: #f5a65b; }}
     .status-fail {{ color: #ff7b7b; }}
-    .status-not_implemented {{ color: #9aa3ad; }}
-    h1, h2, h3, h4 {{
-      margin: 0 0 12px 0;
-    }}
-    table {{
-      width: 100%;
-      border-collapse: collapse;
-      margin-top: 8px;
-      table-layout: fixed;
-    }}
-    th, td {{
-      text-align: left;
-      padding: 8px;
-      border-bottom: 1px solid #2b3138;
-      vertical-align: top;
-      min-width: 0;
-    }}
-    th {{
-      font-size: 12px;
-      text-transform: uppercase;
-      color: #9aa3ad;
-    }}
-    .artifact-row {{
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 6px 0;
-      border-bottom: 1px dashed #2b3138;
-      gap: 12px;
-    }}
-    .artifact-path {{
-      min-width: 0;
-      overflow-wrap: anywhere;
-      word-break: break-word;
-    }}
-    .copy-btn {{
-      background: #1b1f24;
-      border: 1px solid #2b3138;
-      border-radius: 8px;
-      padding: 4px 10px;
-      color: #e6e9ee;
-      cursor: pointer;
-    }}
-    .ghost-btn {{
-      background: transparent;
-      border: 1px dashed #2b3138;
-      border-radius: 8px;
-      padding: 4px 10px;
-      color: #e6e9ee;
-      cursor: pointer;
+    .status-skipped {{ color: #9aa3ad; }}
+    .sev-high {{ color: #ff7b7b; font-weight: 600; }}
+    .sev-medium {{ color: #f5a65b; font-weight: 600; }}
+    .sev-low {{ color: #a8c7fa; font-weight: 600; }}
+    .sev-info {{ color: #9aa3ad; font-weight: 600; }}
+    .score-badge {{ display: inline-block; padding: 10px 14px; border-radius: 10px; font-size: 22px; font-weight: 700; border: 1px solid #2b3138; margin: 6px 0 12px 0; }}
+    .score-good {{ background: rgba(77, 183, 176, 0.2); color: #4db7b0; }}
+    .score-medium {{ background: rgba(245, 166, 91, 0.2); color: #f5a65b; }}
+    .score-bad {{ background: rgba(255, 123, 123, 0.2); color: #ff7b7b; }}
+    .hidden {{ display: none; }}
+    ul {{ margin: 0; padding-left: 20px; }}
+
+    @media print {{
+      body {{ background: #fff; color: #000; }}
+      .card {{ border-color: #aaa; background: #fff; page-break-inside: avoid; }}
+      .btn-link, .btn-mini {{ display: none !important; }}
+      a {{ color: #000; text-decoration: none; }}
     }}
   </style>
+  <script>
+    function tapkaToggle(id, btn) {{
+      const node = document.getElementById(id);
+      if (!node) return;
+      const hidden = node.classList.toggle('hidden');
+      if (btn) btn.textContent = hidden ? 'Показать все' : 'Свернуть';
+    }}
+    function tapkaCopy(value) {{
+      if (!navigator.clipboard) return;
+      navigator.clipboard.writeText(value || '');
+    }}
+  </script>
 </head>
 <body>
   <div class="container">
-    <div class="report-brand">
-      {self._render_logo()}
-      <div>
-        <div class="brand-name">{html.escape(APP_NAME)}</div>
-        <div class="brand-tagline">Cross-tool analysis</div>
-        <p class="muted brand-desc">MobSF static analysis summary for comparison.</p>
-      </div>
-    </div>
-
-    <h1>Cross-tool analysis report</h1>
-    <p class="muted">Generated {html.escape(report.generated_at)}</p>
-
-    <div class="grid grid-3">
-      <div class="card">
-        <h3>APK Summary</h3>
-        {self._summary_line("APK", self._value(static, "app_name") or report.project.apk_name)}
-        {self._summary_line("Package", self._value(static, "package_name") or report.project.package_name)}
-        {self._summary_line("Version", self._value(static, "version_name") or report.project.version_name)}
-        {self._summary_line("Version code", self._value(static, "version_code") or report.project.version_code)}
-        {self._summary_line("SHA256", report.project.apk_sha256, mono=True)}
-        {self._summary_line("Size", self._format_size(report.project.apk_size))}
-      </div>
-      <div class="card">
-        <h3>Run Summary</h3>
-        {self._summary_line("Run ID", report.run.run_id, mono=True)}
-        {self._summary_line("Status", report.run.status)}
-        {self._summary_line("Started", report.run.started_at)}
-        {self._summary_line("Finished", report.run.finished_at)}
-        {self._summary_line("Duration", self._format_duration(report.run.duration_sec))}
-      </div>
-      <div class="card">
-        <h3>MobSF Summary</h3>
-        {self._summary_line("Security score", self._format_security_score(static))}
-        {self._summary_line("Permissions", self._format_number(self._value(static, "permissions_total")))}
-        {self._summary_line("Exported", self._format_number(self._value(static, "exported_total")))}
-        {self._summary_line("URLs", self._format_number(self._value(static, "urls_total")))}
-        {self._summary_line("Trackers", self._format_trackers(static))}
-      </div>
-    </div>
-
-    <h2>Tool status</h2>
-    <div class="grid grid-3">
-      {self._render_tool_cards(report.tool_statuses)}
-    </div>
-
-    <h2>Project and run info</h2>
-    <div class="card">
-      {self._summary_line("Project ID", report.project.project_id, mono=True)}
-      {self._summary_line("APK path", report.project.apk_path, copyable=True, mono=True)}
-      {self._summary_line("Run dir", report.run.run_dir, copyable=True, mono=True)}
-    </div>
-
-    <h2>Static analysis highlights</h2>
-    {self._render_highlights(static)}
-
-    <h2>MobSF findings</h2>
-    {self._render_appsec_findings(static)}
-
-    <h2>Quark analysis</h2>
-    {self._render_quark(report.quark, report.run.run_dir)}
-
-    <h2>Static analysis artifacts</h2>
-    <div class="card">
-      {self._render_artifacts(mobsf.artifacts.static if mobsf else {}, report.run.run_dir)}
-    </div>
-
-    <h2>Dynamic Android</h2>
-    {self._render_dynamic_android(mobsf, report.run.run_dir)}
-
-    <h2>iOS</h2>
-    {self._render_ios(mobsf)}
-
-    {self._render_notes(report.notes)}
+    {_render_header(report)}
+    {_render_toc(cards)}
+    {body}
   </div>
-  <script>
-    document.querySelectorAll('.copy-btn').forEach(btn => {{
-      btn.addEventListener('click', () => {{
-        navigator.clipboard.writeText(btn.dataset.copy);
-        btn.textContent = 'Copied';
-        setTimeout(() => btn.textContent = 'Copy', 1200);
-      }});
-    }});
-
-    const showOtherFindings = document.getElementById('showOtherFindings');
-    if (showOtherFindings) {{
-      showOtherFindings.addEventListener('click', () => {{
-        const hidden = document.getElementById('otherFindings');
-        if (hidden) {{
-          hidden.style.display = 'block';
-        }}
-        showOtherFindings.style.display = 'none';
-      }});
-    }}
-
-    const showAllQuark = document.getElementById('showAllQuark');
-    if (showAllQuark) {{
-      showAllQuark.addEventListener('click', () => {{
-        const hidden = document.getElementById('quarkMore');
-        if (hidden) {{
-          hidden.style.display = 'block';
-        }}
-        showAllQuark.style.display = 'none';
-      }});
-    }}
-  </script>
 </body>
 </html>
 """
 
-    def _render_logo(self) -> str:
-        logo_uri = _logo_data_uri()
-        if not logo_uri:
-            return ""
-        return f'<img class="brand-logo" src="{logo_uri}" alt="{APP_NAME} logo"/>'
 
-    def _render_highlights(self, static) -> str:
-        if not static:
-            return '<div class="card muted">No MobSF data.</div>'
-        permissions = self._render_list(static.permissions_top)
-        exported = self._render_list(static.exported_top)
-        urls = self._render_list(static.urls_top)
-        domains = self._render_list(static.domains_top)
-        trackers = self._render_list(static.trackers_top)
-        manifest_summary = self._render_summary_table(static.manifest_summary)
-        code_summary = self._render_summary_table(static.code_summary)
-        secrets = self._format_number(static.secrets_total)
-        crypto = self._format_number(static.crypto_total)
-        return f"""
-        <div class="grid grid-3">
-          <div class="card">
-            <h3>Permissions & Exported</h3>
-            {self._summary_line("Permissions", self._format_number(static.permissions_total))}
-            {self._summary_line("Exported", self._format_number(static.exported_total))}
-            <div class="muted">Top permissions</div>
-            {permissions}
-            <div class="muted">Top exported</div>
-            {exported}
-          </div>
-          <div class="card">
-            <h3>Code & Manifest Summary</h3>
-            <div class="muted">Manifest findings</div>
-            {manifest_summary}
-            <div class="muted">Code findings</div>
-            {code_summary}
-            {self._summary_line("Secrets", secrets)}
-            {self._summary_line("Crypto indicators", crypto)}
-          </div>
-          <div class="card">
-            <h3>Network & Trackers</h3>
-            {self._summary_line("URLs", self._format_number(static.urls_total))}
-            {self._summary_line("Domains", self._format_number(static.domains_total))}
-            {self._summary_line("Trackers", self._format_trackers(static))}
-            <div class="muted">Top URLs</div>
-            {urls}
-            <div class="muted">Top domains</div>
-            {domains}
-            <div class="muted">Top trackers</div>
-            {trackers}
-          </div>
-        </div>
-        """
-
-    def _render_appsec_findings(self, static) -> str:
-        if not static:
-            return '<div class="card muted">No MobSF findings.</div>'
-        high_rows = self._render_appsec_rows(static.appsec_high)
-        warning_rows = self._render_appsec_rows(static.appsec_warning)
-        info_rows = self._render_appsec_rows(static.appsec_info)
-        secure_rows = self._render_appsec_rows(static.appsec_secure)
-        hotspot_rows = self._render_appsec_rows(static.appsec_hotspot)
-        if not high_rows and not warning_rows and not info_rows and not secure_rows and not hotspot_rows:
-            return '<div class="card muted">No MobSF findings.</div>'
-        other_block = ""
-        if warning_rows or info_rows or secure_rows or hotspot_rows:
-            other_block = f"""
-            <button id="showOtherFindings" class="ghost-btn">Show other findings</button>
-            <div id="otherFindings" style="display:none;">
-              {self._render_appsec_table("Warnings", warning_rows)}
-              {self._render_appsec_table("Info", info_rows)}
-              {self._render_appsec_table("Secure", secure_rows)}
-              {self._render_appsec_table("Hotspots", hotspot_rows)}
-            </div>
-            """
-        return f"""
-        <div class="card">
-          {self._render_appsec_table("High", high_rows)}
-          {other_block}
-        </div>
-        """
-
-    def _render_appsec_table(self, title: str, rows: str) -> str:
-        if not rows:
-            return ""
-        return f"""
-        <h4>{html.escape(title)}</h4>
-        <table>
-          <thead>
-            <tr>
-              <th>Severity</th>
-              <th>Section</th>
-              <th>Title</th>
-              <th>Details</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows}
-          </tbody>
-        </table>
-        """
-
-    def _render_appsec_rows(self, items: list) -> str:
-        rows = []
-        for item in items or []:
-            severity = html.escape(item.severity.upper())
-            section = html.escape(item.section or "N/A")
-            title = html.escape(item.title)
-            description = html.escape(item.description or "-")
-            rows.append(
-                f"<tr><td>{severity}</td><td>{section}</td><td>{title}</td><td>{description}</td></tr>"
-            )
-        return "".join(rows)
-
-    def _render_quark(self, quark, run_dir: str | None) -> str:
-        if not quark:
-            return '<div class="card muted">No Quark data.</div>'
-        summary = quark.summary
-        rows = [
-            ("Status", quark.status),
-            ("Rules dir", quark.rules_dir or "N/A"),
-            ("Rules total", str(summary.rules_total)),
-            ("Matched", str(summary.rules_matched)),
-            ("Failed", str(summary.rules_failed)),
-        ]
-        matches = summary.matches or []
-        table = self._render_quark_table(matches[:10], run_dir)
-        extra = ""
-        if len(matches) > 10:
-            extra = (
-                '<button id="showAllQuark" class="ghost-btn">Show all matches</button>'
-                f'<div id="quarkMore" style="display:none;">{self._render_quark_table(matches[10:], run_dir)}</div>'
-            )
-        return f"""
-        <div class="card">
-          {self._render_table(rows)}
-          <div class="muted">Matched rules</div>
-          {table}
-          {extra}
-        </div>
-        """
-
-    def _render_quark_table(self, matches: list, run_dir: str | None) -> str:
-        if not matches:
-            return "<p class=\"muted\">No matches.</p>"
-        body_rows = []
-        for match in matches:
-            output_path = match.output_path or "-"
-            if run_dir and output_path and output_path != "-":
-                output_path = str(Path(run_dir) / output_path)
-            body_rows.append(
-                "<tr>"
-                f"<td>{html.escape(match.rule_name)}</td>"
-                f"<td>{html.escape(match.rule_path)}</td>"
-                f"<td>{html.escape(output_path)}</td>"
-                "</tr>"
-            )
-        return (
-            "<table><thead><tr>"
-            "<th>Rule</th><th>Path</th><th>Output</th>"
-            "</tr></thead><tbody>"
-            + "".join(body_rows)
-            + "</tbody></table>"
+def render_report_html(report: ReportV2) -> str:
+    if report.stage == STAGE_STATIC:
+        cards = _render_stage1(report)
+    elif report.stage == STAGE_CROSS_TOOL:
+        cards = _render_stage3(report)
+    elif report.stage == STAGE_DYNAMIC:
+        cards = _render_stage2(report)
+    elif report.stage == STAGE_OVERALL:
+        cards = _render_overall(report)
+    else:
+        generic = _card(
+            "generic",
+            "Report",
+            _identification_table(report) + _tools_table(report) + _findings_table(report.findings, "generic-findings") + _artifacts_table(report),
+            None,
         )
-
-    def _render_dynamic_android(self, mobsf: MobSFReport | None, run_dir: str | None) -> str:
-        if not mobsf or not mobsf.dynamic_android.enabled:
-            return '<div class="card muted">Not configured.</div>'
-        dynamic = mobsf.dynamic_android
-        artifacts = self._render_artifacts(mobsf.artifacts.dynamic_android, run_dir)
-        tls = self._render_summary_table(dynamic.tls_tests)
-        frida = self._render_summary_table(dynamic.frida)
-        return f"""
-        <div class="card">
-          {self._summary_line("Status", dynamic.status or "N/A")}
-          {self._summary_line("Logcat lines", self._format_number(dynamic.logcat_lines))}
-          <div class="muted">TLS tests</div>
-          {tls}
-          <div class="muted">Frida</div>
-          {frida}
-          <div class="muted">Artifacts</div>
-          {artifacts}
-        </div>
-        """
-
-    def _render_ios(self, mobsf: MobSFReport | None) -> str:
-        if not mobsf or not mobsf.ios.enabled:
-            return '<div class="card muted">Not configured.</div>'
-        rows = [("Status", mobsf.ios.status or "N/A")]
-        return f"<div class='card'>{self._render_table(rows)}</div>"
-
-    def _render_notes(self, notes: list[str]) -> str:
-        if not notes:
-            return ""
-        items = "".join(f"<li>{html.escape(note)}</li>" for note in notes)
-        return f"""
-        <h2>Notes</h2>
-        <div class="card"><ul>{items}</ul></div>
-        """
-
-    def _render_table(self, rows: list[tuple[str, str]]) -> str:
-        body = "".join(
-            f"<tr><th>{html.escape(label)}</th><td>{html.escape(value)}</td></tr>" for label, value in rows
-        )
-        return f"<table>{body}</table>"
-
-    def _render_artifacts(self, artifacts: dict[str, str], run_dir: str | None) -> str:
-        if not artifacts:
-            return "<div class='muted'>No artifacts.</div>"
-        rows = []
-        for label, path in artifacts.items():
-            copy_path = path
-            if run_dir:
-                suffix = "/" if path.endswith("/") else ""
-                rel = path.rstrip("/")
-                copy_path = str(Path(run_dir) / rel) + suffix
-            rows.append(
-                f"""
-                <div class="artifact-row">
-                  <span class="artifact-path">{html.escape(label)}: {html.escape(path)}</span>
-                  <button class="copy-btn" data-copy="{html.escape(copy_path)}">Copy</button>
-                </div>
-                """
-            )
-        return "".join(rows)
-
-    def _render_tool_cards(self, tool_statuses) -> str:
-        cards = []
-        for tool in tool_statuses:
-            cards.append(
-                f"""
-                <div class="card tool-card">
-                  <div class="tool-title">{html.escape(tool.tool.upper())}</div>
-                  <div class="tool-status status-{tool.status}">{html.escape(tool.status)}</div>
-                  <div class="tool-details">{html.escape(tool.details or '-')}</div>
-                </div>
-                """
-            )
-        return "".join(cards)
-
-    def _summary_line(
-        self,
-        label: str,
-        value: str | None,
-        copyable: bool = False,
-        mono: bool = False,
-    ) -> str:
-        safe_value = html.escape(value or "-")
-        safe_label = html.escape(label)
-        copy_button = ""
-        if copyable and value:
-            copy_button = f' <button class="copy-btn" data-copy="{html.escape(value)}">Copy</button>'
-        mono_class = " mono" if mono else ""
-        return (
-            f'<div class="summary-line"><span class="summary-label">{safe_label}</span>'
-            f'<span class="summary-value{mono_class}">'
-            f'<span class="summary-text">{safe_value}</span>{copy_button}</span></div>'
-        )
-
-    def _render_list(self, items: list[str]) -> str:
-        if not items:
-            return "<p class=\"muted\">N/A</p>"
-        return "<ul>" + "".join(f"<li>{html.escape(item)}</li>" for item in items) + "</ul>"
-
-    def _render_summary_table(self, data: dict[str, int | str | float]) -> str:
-        if not data:
-            return "<div class='muted'>N/A</div>"
-        rows = "".join(
-            f"<tr><th>{html.escape(str(k))}</th><td>{html.escape(str(v))}</td></tr>"
-            for k, v in data.items()
-        )
-        return f"<table>{rows}</table>"
-
-    def _format_trackers(self, static) -> str:
-        if not static:
-            return "N/A"
-        detected = static.trackers_detected
-        total = static.trackers_total
-        if detected is not None and total is not None:
-            return f"{detected}/{total}"
-        if total is not None:
-            return str(total)
-        return "N/A"
-
-    def _format_number(self, value) -> str:
-        if value is None:
-            return "N/A"
-        return str(value)
-
-    def _format_security_score(self, static) -> str:
-        if not static or static.security_score is None:
-            return "N/A"
-        return f"{static.security_score}/100"
-
-    def _format_duration(self, seconds: float | None) -> str:
-        if seconds is None:
-            return "-"
-        minutes, secs = divmod(int(seconds), 60)
-        if minutes:
-            return f"{minutes}m {secs}s"
-        return f"{secs}s"
-
-    def _format_size(self, size: int | None) -> str:
-        if size is None:
-            return "-"
-        value = float(size)
-        for unit in ["B", "KB", "MB", "GB"]:
-            if value < 1024:
-                return f"{value:.0f} {unit}"
-            value /= 1024
-        return f"{value:.0f} TB"
-
-    def _value(self, static, field: str) -> str | None:
-        if not static:
-            return None
-        value = getattr(static, field, None)
-        if value is None:
-            return None
-        return str(value)
+        cards = [generic]
+    return _render_document(report, cards)

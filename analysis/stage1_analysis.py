@@ -160,13 +160,31 @@ class Stage1StaticRunner:
             "source": "private_key_pem",
         },
         {
-            "category": "ndv_dynamic_code_loading",
-            "pattern": r"DexClassLoader|InMemoryDexClassLoader|PathClassLoader|loadDex|defineClass|Runtime\.exec|ProcessBuilder|System\.loadLibrary|System\.load",
+            "category": "ndv_dynamic_code_loading_dex",
+            "pattern": r"\b(DexClassLoader|InMemoryDexClassLoader|PathClassLoader|BaseDexClassLoader)\b|\.loadDex\(|\.defineClass\(",
             "targets": ("jadx",),
             "confidence": "C2",
             "evidence_type": "code",
             "tags": {"dynamic_code"},
-            "source": "dynamic_code_loader",
+            "source": "dex_class_loader",
+        },
+        {
+            "category": "ndv_remote_command_shell",
+            "pattern": r"Runtime\.getRuntime\(\)\.exec\(|new\s+ProcessBuilder\(",
+            "targets": ("jadx",),
+            "confidence": "C2",
+            "evidence_type": "code",
+            "tags": {"dynamic_code"},
+            "source": "shell_exec",
+        },
+        {
+            "category": "ndv_native_code_loader_suspicious",
+            "pattern": r"System\.loadLibrary\(|System\.load\(",
+            "targets": ("jadx",),
+            "confidence": "C1",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "native_loader",
         },
         {
             "category": "sec_insecure_webview_bridge",
@@ -188,25 +206,34 @@ class Stage1StaticRunner:
         },
         {
             "category": "sec_tls_trust_all",
-            "pattern": r"X509TrustManager|checkServerTrusted",
+            "pattern": r"checkServerTrusted\s*\([^)]*\)\s*\{\s*\}|checkServerTrusted[^}]*return\s*;",
             "targets": ("jadx",),
-            "confidence": "C2",
+            "confidence": "C3",
             "evidence_type": "code",
             "tags": {"mitm_enabler"},
-            "source": "tls_trust_all",
+            "source": "tls_trust_all_empty",
+        },
+        {
+            "category": "sec_tls_trust_all",
+            "pattern": r"ALLOW_ALL_HOSTNAME_VERIFIER|AllowAllHostnameVerifier|TrustAllCerts|TrustAllManager|InsecureTrustManager",
+            "targets": ("jadx",),
+            "confidence": "C3",
+            "evidence_type": "code",
+            "tags": {"mitm_enabler"},
+            "source": "tls_trust_all_named",
         },
         {
             "category": "sec_hostname_verifier_bypass",
-            "pattern": r"HostnameVerifier",
+            "pattern": r"ALLOW_ALL_HOSTNAME_VERIFIER|verify\s*\([^)]*\)\s*\{[^}]*return\s+true|HostnameVerifier\s*\(\s*\)\s*->?\s*true",
             "targets": ("jadx",),
-            "confidence": "C2",
+            "confidence": "C3",
             "evidence_type": "code",
             "tags": {"mitm_enabler"},
-            "source": "hostname_verifier",
+            "source": "hostname_verifier_bypass",
         },
         {
             "category": "sec_custom_ca_store_or_user_certs",
-            "pattern": r"KeyStore\.getInstance\(\"(BKS|PKCS12|JKS)\"\)|setCertificateEntry|CertificateFactory\.getInstance",
+            "pattern": r"\.setCertificateEntry\(|TrustManagerFactory\.init\(|KeyStore\.getInstance\(\"BKS\"\)",
             "targets": ("jadx",),
             "confidence": "C2",
             "evidence_type": "code",
@@ -323,7 +350,7 @@ class Stage1StaticRunner:
         },
         {
             "category": "persist_workmanager_periodic",
-            "pattern": r"WorkManager|PeriodicWorkRequest",
+            "pattern": r"PeriodicWorkRequest|enqueueUniquePeriodicWork",
             "targets": ("jadx",),
             "confidence": "C2",
             "evidence_type": "code",
@@ -332,7 +359,7 @@ class Stage1StaticRunner:
         },
         {
             "category": "persist_jobscheduler_periodic",
-            "pattern": r"JobScheduler|setPeriodic",
+            "pattern": r"\.setPeriodic\(|\.setPersisted\(",
             "targets": ("jadx",),
             "confidence": "C2",
             "evidence_type": "code",
@@ -341,7 +368,7 @@ class Stage1StaticRunner:
         },
         {
             "category": "persist_alarmmanager_repeating",
-            "pattern": r"AlarmManager|setRepeating|setInexactRepeating",
+            "pattern": r"\.setRepeating\(|\.setInexactRepeating\(|\.setExactAndAllowWhileIdle\(",
             "targets": ("jadx",),
             "confidence": "C2",
             "evidence_type": "code",
@@ -350,12 +377,21 @@ class Stage1StaticRunner:
         },
         {
             "category": "anomaly_frida_xposed_magisk_detection",
-            "pattern": r"(?i)\b(emulator|goldfish|ranchu|genymotion|frida|xposed|substrate|magisk|busybox)\b",
+            "pattern": r"\b(frida|xposed|substrate|magisk|busybox|supersu|rootbeer|rootcloak)\b",
             "targets": ("jadx",),
             "confidence": "C2",
             "evidence_type": "code",
             "tags": set(),
-            "source": "analysis_evasion",
+            "source": "analysis_evasion_tools",
+        },
+        {
+            "category": "anomaly_emulator_detection",
+            "pattern": r"\b(goldfish|ranchu|genymotion|generic_x86|Andy|Droid4X|nox|bluestacks)\b|Build\.(FINGERPRINT|HARDWARE|MODEL|PRODUCT).*(?:generic|sdk|emulator|vbox)",
+            "targets": ("jadx",),
+            "confidence": "C2",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "emulator_detection",
         },
         {
             "category": "anomaly_anti_debug",
@@ -366,18 +402,198 @@ class Stage1StaticRunner:
             "tags": set(),
             "source": "analysis_evasion",
         },
+        # --- Небезопасная криптография ---
+        {
+            "category": "sec_weak_crypto",
+            "pattern": r'Cipher\.getInstance\(\s*"(AES/ECB|DES|DESede|RC4|RC2|Blowfish)|MessageDigest\.getInstance\(\s*"(MD5|SHA-1)"',
+            "targets": ("jadx",),
+            "confidence": "C3",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "weak_crypto",
+        },
+        # --- Предсказуемый ГПСЧ ---
+        {
+            "category": "sec_predictable_random",
+            "pattern": r"SecureRandom.*\.setSeed\(\s*(System\.currentTimeMillis|System\.nanoTime|new\s+Date)",
+            "targets": ("jadx",),
+            "confidence": "C2",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "predictable_random",
+        },
+        # --- Глобально доступные файлы ---
+        {
+            "category": "sec_world_readable_writable",
+            "pattern": r"MODE_WORLD_READABLE|MODE_WORLD_WRITABLE",
+            "targets": ("jadx",),
+            "confidence": "C3",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "world_rw",
+        },
+        # --- Запись на SD ---
+        {
+            "category": "sec_external_storage_sensitive",
+            "pattern": r"getExternalStorageDirectory|getExternalFilesDir",
+            "targets": ("jadx",),
+            "confidence": "C1",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "external_storage",
+        },
+        # --- WebView JS eval ---
+        {
+            "category": "sec_webview_js_eval",
+            "pattern": r'\.loadUrl\(\s*"javascript:|\.evaluateJavascript\(',
+            "targets": ("jadx",),
+            "confidence": "C2",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "webview_js_eval",
+        },
+        # --- SQL injection ---
+        {
+            "category": "sec_sql_injection",
+            "pattern": r'\.rawQuery\(\s*"[^"]*"\s*\+|\.execSQL\(\s*"[^"]*"\s*\+',
+            "targets": ("jadx",),
+            "confidence": "C2",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "sql_injection",
+        },
+        # --- Логирование чувствительных данных ---
+        {
+            "category": "sec_log_sensitive_data",
+            "pattern": r"Log\.[dviwé]\([^)]*(?i)(password|passwd|token|secret|apikey|api_key|credential|ssn|credit.?card)",
+            "targets": ("jadx",),
+            "confidence": "C1",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "log_sensitive",
+        },
+        # --- SharedPreferences + секреты ---
+        {
+            "category": "sec_sharedprefs_sensitive",
+            "pattern": r"\.edit\(\)\.put(?:String|Int|Long)\([^)]*(?i)(password|token|secret|api.?key|private.?key|credential)",
+            "targets": ("jadx",),
+            "confidence": "C1",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "sharedprefs_sensitive",
+        },
+        # --- SMS sending ---
+        {
+            "category": "ndv_sms_send",
+            "pattern": r"SmsManager\.getDefault\(\)|\.sendTextMessage\(|\.sendMultipartTextMessage\(",
+            "targets": ("jadx",),
+            "confidence": "C2",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "sms_send",
+        },
+        # --- Device identifiers ---
+        {
+            "category": "ndv_device_identifiers",
+            "pattern": r"\.getDeviceId\(|\.getImei\(|\.getSubscriberId\(|\.getLine1Number\(|\.getMeid\(|\.getSimSerialNumber\(",
+            "targets": ("jadx",),
+            "confidence": "C2",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "device_id",
+        },
+        # --- Contacts / CallLog / Calendar ---
+        {
+            "category": "ndv_contacts_access",
+            "pattern": r"ContactsContract|CallLog\.Calls|CalendarContract",
+            "targets": ("jadx",),
+            "confidence": "C2",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "pii_access",
+        },
+        # --- Account enumeration ---
+        {
+            "category": "ndv_account_enumeration",
+            "pattern": r"AccountManager\.get\(|\.getAccounts\(|\.getAccountsByType\(",
+            "targets": ("jadx",),
+            "confidence": "C2",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "account_enum",
+        },
+        # --- Installed apps enumeration ---
+        {
+            "category": "ndv_app_enumeration",
+            "pattern": r"\.getInstalledPackages\(|\.getInstalledApplications\(",
+            "targets": ("jadx",),
+            "confidence": "C1",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "app_enum",
+        },
+        # --- Wi-Fi fingerprinting ---
+        {
+            "category": "ndv_wifi_fingerprinting",
+            "pattern": r"WifiManager.*\.getScanResults\(|\.getConnectionInfo\(",
+            "targets": ("jadx",),
+            "confidence": "C1",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "wifi_fingerprint",
+        },
+        # --- Bluetooth enumeration ---
+        {
+            "category": "ndv_bluetooth_enumeration",
+            "pattern": r"BluetoothAdapter.*\.getBondedDevices\(",
+            "targets": ("jadx",),
+            "confidence": "C1",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "bt_enum",
+        },
+        # --- Device admin ---
+        {
+            "category": "ndv_device_admin",
+            "pattern": r"DevicePolicyManager|BIND_DEVICE_ADMIN|DeviceAdminReceiver",
+            "targets": ("jadx",),
+            "confidence": "C2",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "device_admin",
+        },
+        # --- Certificate pinning (info, не уязвимость) ---
+        {
+            "category": "sec_certificate_pinning",
+            "pattern": r'CertificatePinner|\.check\(\s*"[^"]+"\s*,\s*"sha256/',
+            "targets": ("jadx",),
+            "confidence": "C2",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "cert_pinning",
+        },
+        # --- Proxy bypass ---
+        {
+            "category": "ndv_proxy_bypass",
+            "pattern": r"Proxy\.NO_PROXY|\.proxy\(\s*Proxy\.NO_PROXY\s*\)",
+            "targets": ("jadx",),
+            "confidence": "C2",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "proxy_bypass",
+        },
     ]
     STRINGS_PATTERN_STRINGS = {
         "secret_endpoints_hardcoded": r'(https?|wss?|ftp|grpc|grpcs|mqtts?|rtsp)://(?!schemas\.android\.com)[^" <>{}]{8,}',
         "secret_endpoints_ipv4": r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])",
-        "ndv_dynamic_code_loading": r"DexClassLoader|InMemoryDexClassLoader|PathClassLoader",
-        "ndv_remote_command": r"Runtime\.exec|ProcessBuilder",
+        "ndv_dynamic_code_loading_dex": r"DexClassLoader|InMemoryDexClassLoader|PathClassLoader",
+        "ndv_remote_command_shell": r"Runtime\.exec|ProcessBuilder",
     }
     STRINGS_CATEGORY_META = {
         "secret_endpoints_hardcoded": {"tags": {"network"}, "category": "secret_endpoints_hardcoded"},
         "secret_endpoints_ipv4": {"tags": {"network"}, "category": "secret_endpoints_hardcoded"},
-        "ndv_dynamic_code_loading": {"tags": {"dynamic_code"}, "category": "ndv_dynamic_code_loading"},
-        "ndv_remote_command": {"tags": set(), "category": "ndv_remote_command"},
+        "ndv_dynamic_code_loading_dex": {"tags": {"dynamic_code"}, "category": "ndv_dynamic_code_loading_dex"},
+        "ndv_remote_command_shell": {"tags": set(), "category": "ndv_remote_command_shell"},
     }
     YARA_RULE_CATEGORY = {
         "ANDROID_Remote_Command_MQTT_WS": ("ndv_remote_command", {"network"}),
@@ -391,6 +607,8 @@ class Stage1StaticRunner:
         "ANDROID_Traffic_Interception_VPN_TUN": ("ndv_traffic_intercept_vpn", {"network"}),
         "ANDROID_TLS_TrustAll_or_MITM_Indicators": ("sec_tls_trust_all", {"mitm_enabler"}),
         "ANDROID_Combined_Spy_Profile_Strong": ("ndv_remote_command", {"network", "persistence", "background"}),
+        "ANDROID_Device_Admin_Abuse": ("ndv_device_admin", set()),
+        "ANDROID_Anti_Tamper_Signature_Check": ("anomaly_anti_tamper", set()),
     }
 
     def __init__(
@@ -841,26 +1059,49 @@ class Stage1StaticRunner:
                 stdout_path=str(stdout_path),
                 stderr_path=str(stderr_path),
             )
-        argv.extend(targets)
-        return self._run_tool("yara", argv, logs_dir, "yara")
-
-    def _write_yara_scan_list(
-        self,
-        list_path: Path,
-        apktool_dir: Path,
-        jadx_dir: Path,
-        apk_path: Path,
-    ) -> None:
-        list_path.parent.mkdir(parents=True, exist_ok=True)
-        with list_path.open("w", encoding="utf-8") as handle:
-            for base_dir in (apktool_dir, jadx_dir):
-                if not base_dir.exists():
-                    continue
-                for file_path in base_dir.rglob("*"):
-                    if file_path.is_file():
-                        handle.write(f"{file_path}\n")
-            if apk_path.exists():
-                handle.write(f"{apk_path}\n")
+        # YARA 4.x принимает только ОДИН target (последний аргумент).
+        # Все предыдущие аргументы воспринимаются как файлы правил.
+        # Запускаем YARA отдельно для каждой директории и объединяем stdout.
+        combined_stdout_parts: list[str] = []
+        combined_stderr_parts: list[str] = []
+        last_result = None
+        for idx, target in enumerate(targets):
+            label = f"yara_{idx}"
+            result = self._run_tool("yara", argv + [target], logs_dir, label)
+            last_result = result
+            for part_list, path_attr in (
+                (combined_stdout_parts, result.stdout_path),
+                (combined_stderr_parts, result.stderr_path),
+            ):
+                try:
+                    text = Path(path_attr).read_text(encoding="utf-8", errors="replace")
+                    if text.strip():
+                        part_list.append(text)
+                except OSError:
+                    pass
+        stdout_path.write_text("\n".join(combined_stdout_parts), encoding="utf-8")
+        stderr_path.write_text("\n".join(combined_stderr_parts), encoding="utf-8")
+        if last_result is None:
+            return CommandResult(
+                tool="yara",
+                argv=argv,
+                cwd=str(logs_dir.parent),
+                return_code=0,
+                duration_sec=0.0,
+                stdout_path=str(stdout_path),
+                stderr_path=str(stderr_path),
+            )
+        return CommandResult(
+            tool=last_result.tool,
+            argv=argv + targets,
+            cwd=last_result.cwd,
+            return_code=last_result.return_code,
+            duration_sec=last_result.duration_sec,
+            stdout_path=str(stdout_path),
+            stderr_path=str(stderr_path),
+            error=last_result.error,
+            timed_out=last_result.timed_out,
+        )
 
     def _extract_certs(
         self,
@@ -1482,6 +1723,54 @@ class Stage1StaticRunner:
                         tags={"persistence", "background"},
                         sources=["manifest:boot_completed"],
                     )
+                if tag == "receiver":
+                    ndv_actions = {
+                        "android.intent.action.PACKAGE_ADDED",
+                        "android.intent.action.PACKAGE_REMOVED",
+                        "android.intent.action.NEW_OUTGOING_CALL",
+                        "android.telephony.action.PHONE_STATE_CHANGED",
+                        "android.intent.action.PHONE_STATE",
+                    }
+                    for intent_filter in component.findall("intent-filter"):
+                        for action in intent_filter.findall("action"):
+                            action_name = action.get(f"{ns}name") or ""
+                            if action_name in ndv_actions:
+                                self._add_manifest_finding(
+                                    findings,
+                                    manifest_path,
+                                    run_dir,
+                                    "ndv_sms_intercept",
+                                    f"receiver:{name} listens to {action_name}",
+                                    tags={"background"},
+                                    sources=["manifest:protected_broadcast"],
+                                )
+                                break
+                if tag in ("activity", "activity-alias") and exported:
+                    launch_mode = component.get(f"{ns}launchMode") or ""
+                    task_affinity = component.get(f"{ns}taskAffinity")
+                    if launch_mode == "singleTask" and task_affinity != "":
+                        self._add_manifest_finding(
+                            findings,
+                            manifest_path,
+                            run_dir,
+                            "vul_task_hijacking",
+                            f"activity:{name} singleTask exported without taskAffinity=\"\"",
+                            tags={"exported"},
+                            sources=["manifest:task_hijacking"],
+                        )
+                    exclude_from_recents = (
+                        component.get(f"{ns}excludeFromRecents") or "false"
+                    ).lower() == "true"
+                    if exclude_from_recents:
+                        self._add_manifest_finding(
+                            findings,
+                            manifest_path,
+                            run_dir,
+                            "vul_exported_component_no_permission",
+                            f"activity:{name} exported + excludeFromRecents (hidden from user)",
+                            tags={"exported"},
+                            sources=["manifest:exclude_from_recents"],
+                        )
                 if tag == "service":
                     perm = component.get(f"{ns}permission") or ""
                     if perm == "android.permission.BIND_NOTIFICATION_LISTENER_SERVICE":
@@ -1742,9 +2031,12 @@ class Stage1StaticRunner:
                 continue
             rule_name, file_path = parts[0].strip(), parts[1].strip()
             mapping = self.YARA_RULE_CATEGORY.get(rule_name)
-            if not mapping:
-                continue
-            category, tags = mapping
+            if mapping:
+                category, tags = mapping
+            else:
+                # Fallback для пользовательских/неизвестных YARA-правил
+                category = f"yara_custom_{rule_name.lower()}"
+                tags = set()
             findings.append(
                 self._make_finding(
                     FindingSpec(
@@ -1798,6 +2090,7 @@ class Stage1StaticRunner:
         findings = self._aggregate_reflection_findings(findings, run_dir)
         findings = self._apply_download_execute(findings, run_dir)
         findings = self._apply_persistence_boost(findings)
+        findings = self._apply_combo_boosts(findings)
         return self._dedupe_findings(findings)
 
     def _aggregate_reflection_findings(self, findings: list[Finding], run_dir: Path) -> list[Finding]:
@@ -1835,9 +2128,10 @@ class Stage1StaticRunner:
             for f in findings
             if f.category
             in (
-                "ndv_dynamic_code_loading",
+                "ndv_dynamic_code_loading_dex",
                 "ndv_native_code_loader_suspicious",
                 "ndv_remote_command",
+                "ndv_remote_command_shell",
             )
         ]
         if not code_exec:
@@ -1886,6 +2180,36 @@ class Stage1StaticRunner:
             finding.tags.add("persistence")
         return findings
 
+    def _apply_combo_boosts(self, findings: list[Finding]) -> list[Finding]:
+        """Повысить confidence при наличии подтверждающих комбинаций."""
+        categories = {f.category for f in findings}
+        has_persistence = bool(
+            categories
+            & {
+                "persist_boot_completed",
+                "persist_workmanager_periodic",
+                "persist_jobscheduler_periodic",
+                "persist_alarmmanager_repeating",
+            }
+        )
+        has_network = any("network" in (f.tags or set()) for f in findings)
+
+        combos = [
+            ("ndv_mic_eavesdropping", has_persistence),
+            ("ndv_camera_surveillance", has_persistence),
+            ("ndv_geo_tracking_background", has_persistence),
+            ("ndv_keylogging_like", has_network),
+            ("ndv_dynamic_code_loading_dex", has_network),
+            ("ndv_traffic_intercept_vpn", "sec_tls_trust_all" in categories),
+        ]
+        for finding in findings:
+            for target_cat, condition in combos:
+                if finding.category == target_cat and condition:
+                    if finding.confidence in ("C1", "C2"):
+                        finding.confidence = "C3"
+                        finding.tags.add("combo_confirmed")
+        return findings
+
     def _dedupe_findings(self, findings: list[Finding]) -> list[Finding]:
         seen: set[tuple] = set()
         deduped: list[Finding] = []
@@ -1902,60 +2226,3 @@ class Stage1StaticRunner:
             seen.add(key)
             deduped.append(finding)
         return deduped
-
-    def _write_report(self, report_path: Path, run: Run, findings: list[Finding]) -> None:
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        category_counts: dict[str, int] = {}
-        for finding in findings:
-            category_counts[finding.category] = category_counts.get(finding.category, 0) + 1
-        lines = [
-            "# Stage 1 Static Analysis Report",
-            "",
-            f"- Run ID: {run.run_id}",
-            f"- Project ID: {run.project_id}",
-            f"- Status: {run.status}",
-            f"- Started At: {run.started_at}",
-            f"- Finished At: {run.finished_at or 'N/A'}",
-            f"- APK Path: {run.apk_path}",
-            "",
-            "## Findings Summary",
-        ]
-        if category_counts:
-            for category, count in sorted(category_counts.items()):
-                lines.append(f"- {category}: {count}")
-        else:
-            lines.append("- No findings")
-
-        lines.append("")
-        lines.append("## Findings")
-        if findings:
-            for finding in findings:
-                location = finding.file_path
-                if finding.line is not None:
-                    location += f":{finding.line}"
-                    if finding.column is not None:
-                        location += f":{finding.column}"
-                source = ", ".join(finding.sources) if finding.sources else (finding.source or "unknown")
-                severity = finding.severity or "info"
-                evidence = finding.evidence or finding.match or ""
-                lines.append(
-                    f"- [{severity.upper()}] [{finding.category}] {evidence} ({location}) [{source}]"
-                )
-        else:
-            lines.append("- None")
-
-        if run.errors:
-            lines.append("")
-            lines.append("## Errors")
-            for error in run.errors:
-                lines.append(f"- {error}")
-
-        report_path.write_text("\n".join(lines), encoding="utf-8")
-
-    def _write_report_json(self, report_path: Path, run: Run, findings: list[Finding]) -> None:
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "run": run.model_dump(mode="json"),
-            "findings": [finding.model_dump(mode="json") for finding in findings],
-        }
-        report_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

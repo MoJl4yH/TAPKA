@@ -94,6 +94,9 @@ class Storage:
             raise ValueError("Project name cannot be empty.")
         if os.sep in project_id or (os.altsep and os.altsep in project_id):
             raise ValueError("Project name contains invalid path separators.")
+        project_id = self._sanitize_name(project_id)
+        if not project_id or project_id == "apk":
+            raise ValueError("Project name is invalid after sanitization.")
         project_dir = self.get_project_dir(project_id)
         if project_dir.exists():
             raise FileExistsError(f"Project already exists: {project_id}")

@@ -223,7 +223,7 @@ QScrollBar::sub-line:vertical {
 """
 
 
-def get_style(theme: str = "light") -> str:
+def get_style() -> str:
     return DARK_STYLE
 
 

@@ -64,11 +64,6 @@ def extract_api_key_from_logs(logs: str) -> str | None:
     return match.group(1)
 
 
-def fetch_api_key(base_url: str, timeout_sec: int = 5) -> str | None:
-    html = fetch_api_docs(base_url, timeout_sec=timeout_sec)
-    return extract_api_key(html)
-
-
 def generate_api_key() -> str:
     return token_hex(32)
 
@@ -136,18 +131,6 @@ def docker_stop(container_name: str = MOBSF_CONTAINER_NAME) -> bool:
         if "no such container" in stderr.lower():
             return False
         raise RuntimeError(stderr)
-    return True
-
-
-def docker_remove(container_name: str = MOBSF_CONTAINER_NAME) -> bool:
-    result = _run_docker(["docker", "rm", "-f", container_name])
-    if result.returncode != 0:
-        stderr = result.stderr.strip()
-        stdout = result.stdout.strip()
-        message = stderr or stdout or "docker rm failed"
-        if "no such container" in message.lower():
-            return False
-        raise RuntimeError(message)
     return True
 
 

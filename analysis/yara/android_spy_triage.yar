@@ -249,3 +249,37 @@ rule ANDROID_Combined_Spy_Profile_Strong
     (any of ($geo1,$geo2,$mic,$cam,$scr1,$acc)) and
     (any of ($boot,$wm,$job,$trust))
 }
+
+rule ANDROID_Device_Admin_Abuse
+{
+  meta:
+    category = "device_admin"
+    confidence = "medium"
+    description = "Device admin API usage indicators"
+  strings:
+    $da1 = "DevicePolicyManager" ascii
+    $da2 = "BIND_DEVICE_ADMIN" ascii
+    $da3 = "DeviceAdminReceiver" ascii
+    $da4 = "lockNow" ascii
+    $da5 = "wipeData" ascii
+    $da6 = "resetPassword" ascii
+  condition:
+    2 of ($da*)
+}
+
+rule ANDROID_Anti_Tamper_Signature_Check
+{
+  meta:
+    category = "anti_tamper"
+    confidence = "low"
+    description = "Signature verification with kill/exit on mismatch"
+  strings:
+    $sig1 = "PackageInfo" ascii
+    $sig2 = "signatures" ascii
+    $sig3 = "hashCode" ascii
+    $kill1 = "Process.killProcess" ascii
+    $kill2 = "System.exit" ascii
+    $kill3 = "finish()" ascii
+  condition:
+    2 of ($sig*) and 1 of ($kill*)
+}

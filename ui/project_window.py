@@ -177,7 +177,7 @@ class ProjectWindow(QWidget):
             status_label.setProperty("status", "pending")
             status_label.setFlat(True)
             status_label.setCursor(Qt.ArrowCursor)
-            status_label.clicked.connect(lambda checked=False, tool=tool: self._open_tool_stderr(tool))
+            status_label.clicked.connect(lambda _checked=False, tool=tool: self._open_tool_stderr(tool))
             status_layout.addRow(f"{label}:", status_label)
             self.tool_status_labels[tool] = status_label
         stage_layout.addLayout(status_layout)

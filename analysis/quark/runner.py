@@ -46,7 +46,7 @@ class QuarkRunner:
         report = QuarkReport(status="skipped")
         if shutil.which(QUARK_COMMAND) is None:
             report.status = "missing"
-            report.errors.append("quark executable not found in PATH.")
+            self._append_report_error(report, "quark executable not found in PATH.")
             return report
 
         if ctx is not None:
@@ -56,7 +56,7 @@ class QuarkRunner:
         rules_dir = self._ensure_rules_dir()
         if not rules_dir:
             report.status = "missing_rules"
-            report.errors.append("Quark rules directory not found.")
+            self._append_report_error(report, "Quark rules directory not found.")
             return report
 
         rules_path = rules_dir / "rules"
@@ -66,7 +66,11 @@ class QuarkRunner:
 
         out_dir.mkdir(parents=True, exist_ok=True)
         rules_dir_rel = self._relpath(run_dir, rules_path) + "/"
-        report.summary.artifacts["rules_dir"] = rules_dir_rel
+        summary_artifacts = (
+            dict(report.summary.artifacts) if isinstance(report.summary.artifacts, dict) else {}
+        )
+        summary_artifacts["rules_dir"] = rules_dir_rel
+        report.summary.artifacts = summary_artifacts
 
         def _execute(command: list[str], tool_name: str, timeout_sec: float | None) -> tuple[str, str, int]:
             stdout_handle = None
@@ -166,7 +170,7 @@ class QuarkRunner:
             stderr_first = (stderr or "").strip().splitlines()
             if stderr_first:
                 reason = f"{reason}: {stderr_first[0]}"
-            report.errors.append(reason)
+            self._append_report_error(report, reason)
         report.summary = QuarkSummary(
             rules_total=0,
             rules_matched=0,
@@ -261,3 +265,9 @@ class QuarkRunner:
             return str(path.relative_to(run_dir))
         except ValueError:
             return str(path)
+
+    def _append_report_error(self, report: QuarkReport, message: str) -> None:
+        errors = report.errors if isinstance(report.errors, list) else []
+        errors = [str(item) for item in errors]
+        errors.append(message)
+        report.errors = errors

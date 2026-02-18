@@ -13,6 +13,19 @@ from models.report import (
     Stage3ReportModel,
     OverallReportModel,
 )
+from models.report_v2 import (
+    ArtifactRefV2,
+    EvidenceItemV2,
+    FindingV2,
+    IndicatorExampleV2,
+    IndicatorV2,
+    ProjectInfoV2,
+    ReportV2,
+    RunInfoV2,
+    SectionV2,
+    SourceRefV2,
+    ToolRunV2,
+)
 
 __all__ = [
     "ApkMeta",
@@ -28,4 +41,15 @@ __all__ = [
     "Stage2ReportModel",
     "Stage3ReportModel",
     "OverallReportModel",
+    "ArtifactRefV2",
+    "EvidenceItemV2",
+    "FindingV2",
+    "IndicatorExampleV2",
+    "IndicatorV2",
+    "ProjectInfoV2",
+    "ReportV2",
+    "RunInfoV2",
+    "SectionV2",
+    "SourceRefV2",
+    "ToolRunV2",
 ]

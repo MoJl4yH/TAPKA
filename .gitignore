@@ -18,8 +18,11 @@ dist/
 *.aab
 avd/
 .emulator_console_auth_token
+rules_severity_refactor_spec.md
 *.qcow2
 *.img
+.~*
+report_generation_spec.md
 *.ini
 *.log
 *.pcap
