@@ -133,7 +133,6 @@ class QuarkRunner:
             str(rules_path),
             "-a",
             str(apk_path),
-            "-s",
             "--output",
             str(output_json_path),
         ]

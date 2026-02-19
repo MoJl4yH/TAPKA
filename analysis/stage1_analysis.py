@@ -118,6 +118,7 @@ class Stage1StaticRunner:
             "category": "secret_endpoints_hardcoded",
             "pattern": r'(https?|wss?|ftp|grpc|grpcs|mqtts?|rtsp)://(?!schemas\.android\.com)[^" <>{}]{8,}',
             "targets": ("apktool", "jadx"),
+            "scope": "app_res",
             "confidence": "C1",
             "evidence_type": "string",
             "tags": {"network"},
@@ -127,6 +128,7 @@ class Stage1StaticRunner:
             "category": "secret_endpoints_hardcoded",
             "pattern": r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])",
             "targets": ("apktool", "jadx"),
+            "scope": "app_res",
             "confidence": "C1",
             "evidence_type": "string",
             "tags": {"network"},
@@ -136,6 +138,7 @@ class Stage1StaticRunner:
             "category": "secret_sensitive_kv",
             "pattern": r"(?i)\b(api[_-]?key|secret|token|password|passwd|pwd|auth[_-]?token|access[_-]?token|private[_-]?key)\b\s*[:=>]\s*[\"'][A-Za-z0-9+/=_\-.]{8,}[\"']",
             "targets": ("apktool", "jadx"),
+            "scope": "app_res",
             "confidence": "C1",
             "evidence_type": "string",
             "tags": set(),
@@ -145,6 +148,7 @@ class Stage1StaticRunner:
             "category": "secret_jwt_embedded",
             "pattern": r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
             "targets": ("apktool", "jadx"),
+            "scope": "full",
             "confidence": "C1",
             "evidence_type": "string",
             "tags": set(),
@@ -154,6 +158,7 @@ class Stage1StaticRunner:
             "category": "secret_private_key_pem",
             "pattern": r"-----BEGIN (?:RSA |EC )?PRIVATE KEY-----",
             "targets": ("apktool", "jadx"),
+            "scope": "full",
             "confidence": "C1",
             "evidence_type": "string",
             "tags": set(),
@@ -582,6 +587,50 @@ class Stage1StaticRunner:
             "tags": set(),
             "source": "proxy_bypass",
         },
+        # --- Hardcoded credentials (Java/Kotlin) ---
+        {
+            "category": "secret_hardcoded_credentials",
+            "pattern": r'(?i)(?:password|passwd|pwd|passphrase|credentials?|secret)\s*=\s*"[^"]{4,}"',
+            "targets": ("jadx",),
+            "scope": "app",
+            "confidence": "C2",
+            "evidence_type": "string",
+            "tags": set(),
+            "source": "hardcoded_creds",
+        },
+        # --- Hardcoded credentials (smali/resources) ---
+        {
+            "category": "secret_hardcoded_credentials",
+            "pattern": r'(?i)(?:password|passwd|pwd|passphrase|default_?password|admin_?pass)\s*[:=]\s*["\x27][^\s"\']{4,}',
+            "targets": ("apktool",),
+            "scope": "app_res",
+            "confidence": "C2",
+            "evidence_type": "string",
+            "tags": set(),
+            "source": "hardcoded_creds_res",
+        },
+        # --- Dynamic BroadcastReceiver without permission ---
+        {
+            "category": "sec_broadcast_receiver_no_permission",
+            "pattern": r"\.registerReceiver\(\s*\w+\s*,\s*(?:new\s+IntentFilter|\w+Filter)\s*\)",
+            "targets": ("jadx",),
+            "scope": "app",
+            "confidence": "C2",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "broadcast_no_perm",
+        },
+        # --- Intent extras read (auxiliary, for correlation) ---
+        {
+            "category": "sec_intent_extra_read",
+            "pattern": r"getIntent\(\)\.get(?:String|Int|Boolean|Serializable|Parcelable)?Extra\(|\.getExtras\(\)",
+            "targets": ("jadx",),
+            "scope": "app",
+            "confidence": "C1",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "intent_extra_read",
+        },
     ]
     STRINGS_PATTERN_STRINGS = {
         "secret_endpoints_hardcoded": r'(https?|wss?|ftp|grpc|grpcs|mqtts?|rtsp)://(?!schemas\.android\.com)[^" <>{}]{8,}',
@@ -610,6 +659,18 @@ class Stage1StaticRunner:
         "ANDROID_Device_Admin_Abuse": ("ndv_device_admin", set()),
         "ANDROID_Anti_Tamper_Signature_Check": ("anomaly_anti_tamper", set()),
     }
+
+    LIB_DENYLIST_PREFIXES = (
+        "com/google/", "androidx/", "android/support/",
+        "kotlin/", "kotlinx/", "org/apache/",
+        "com/squareup/", "io/reactivex/", "okhttp3/",
+        "com/facebook/", "com/crashlytics/", "io/fabric/",
+        "org/intellij/", "org/jetbrains/", "junit/",
+        "com/bumptech/glide/", "com/jakewharton/",
+        "org/bouncycastle/", "org/conscrypt/",
+        "com/android/volley/", "retrofit2/",
+        "io/grpc/", "com/fasterxml/", "org/json/",
+    )
 
     def __init__(
         self,
@@ -1128,6 +1189,61 @@ class Stage1StaticRunner:
             log(f"Failed to extract certs: {exc}")
         return extracted
 
+    @staticmethod
+    def _is_lib_path(file_path: str) -> bool:
+        """True если путь файла указывает на известную стороннюю библиотеку."""
+        for marker in ("sources/", "smali/"):
+            idx = file_path.find(marker)
+            if idx >= 0:
+                relative = file_path[idx + len(marker):]
+                for prefix in ("classes2/", "classes3/", "classes4/", "classes5/"):
+                    if relative.startswith(prefix):
+                        relative = relative[len(prefix):]
+                        break
+                if any(relative.startswith(p) for p in Stage1StaticRunner.LIB_DENYLIST_PREFIXES):
+                    return True
+        return False
+
+    def _resolve_scope_targets(
+        self,
+        scope: str,
+        label: str,
+        base_target: Path,
+        package_path: str,
+    ) -> list[Path]:
+        """Вернуть список директорий для rg в зависимости от scope."""
+        if scope == "full" or not package_path:
+            return [base_target]
+
+        targets: list[Path] = []
+
+        if label == "jadx":
+            app_src = base_target / "sources" / package_path
+            if app_src.exists():
+                targets.append(app_src)
+            if scope == "app_res":
+                res_dir = base_target / "resources" / "res"
+                if res_dir.exists():
+                    targets.append(res_dir)
+        elif label == "apktool":
+            for child in base_target.iterdir():
+                if child.is_dir() and child.name.startswith("smali"):
+                    app_smali = child / package_path
+                    if app_smali.exists():
+                        targets.append(app_smali)
+            if scope == "app_res":
+                res_dir = base_target / "res"
+                if res_dir.exists():
+                    targets.append(res_dir)
+                assets_dir = base_target / "assets"
+                if assets_dir.exists():
+                    targets.append(assets_dir)
+
+        if not targets:
+            targets.append(base_target)
+
+        return targets
+
     def _collect_findings(
         self,
         apktool_dir: Path,
@@ -1143,26 +1259,35 @@ class Stage1StaticRunner:
         findings.extend(manifest_findings)
         findings.extend(self._apksigner_findings(logs_dir, run_dir, manifest_meta.get("target_sdk")))
         findings.extend(self._keytool_findings(logs_dir, run_dir))
+
+        package_name = manifest_meta.get("package_name", "")
+        package_path = package_name.replace(".", "/")
+
         rg_targets = {}
         if apktool_dir.exists():
             rg_targets["apktool"] = apktool_dir
         if jadx_dir.exists():
             rg_targets["jadx"] = jadx_dir
 
-        for label, target in rg_targets.items():
+        for label, base_target in rg_targets.items():
             for spec in self.RG_PATTERN_SPECS:
                 if label not in spec["targets"]:
                     continue
-                rg_findings, result = self._rg_findings(
-                    spec=spec,
-                    target=target,
-                    logs_dir=logs_dir,
-                    run_dir=run_dir,
-                    source=f"rg_{label}",
-                    run_step=run_step,
-                )
-                findings.extend(rg_findings)
-                command_results.append(result)
+                scope = spec.get("scope", "app")
+                scan_targets = self._resolve_scope_targets(scope, label, base_target, package_path)
+                for idx, target in enumerate(scan_targets):
+                    # Только первый target считается как шаг прогресса — остальные не влияют на счётчик
+                    effective_run_step = run_step if idx == 0 else (lambda lbl, fn: fn())
+                    rg_findings, result = self._rg_findings(
+                        spec=spec,
+                        target=target,
+                        logs_dir=logs_dir,
+                        run_dir=run_dir,
+                        source=f"rg_{label}",
+                        run_step=effective_run_step,
+                    )
+                    findings.extend(rg_findings)
+                    command_results.append(result)
 
         if apktool_dir.exists():
             patterns = {
@@ -1803,6 +1928,7 @@ class Stage1StaticRunner:
         except (ET.ParseError, OSError):
             meta.update(self._parse_aapt2_info(logs_dir))
             return findings, meta
+        meta["package_name"] = root.get("package") or ""
         permissions = self._manifest_permissions(root, ns)
         meta["permissions"] = permissions
         target_sdk = self._manifest_target_sdk(root, ns)
@@ -1865,7 +1991,7 @@ class Stage1StaticRunner:
         return findings, meta
 
     def _parse_aapt2_info(self, logs_dir: Path) -> dict:
-        info: dict[str, int] = {}
+        info: dict = {}
         stdout_path = logs_dir / "aapt2.stdout.txt"
         if not stdout_path.exists():
             return info
@@ -1873,6 +1999,12 @@ class Stage1StaticRunner:
         match = re.search(r"targetSdkVersion:'(\d+)'", text)
         if match:
             info["target_sdk"] = int(match.group(1))
+        match = re.search(r"package:\s*name='([^']+)'", text)
+        if match:
+            info["package_name"] = match.group(1)
+        match = re.search(r"minSdkVersion:'(\d+)'", text)
+        if match:
+            info["min_sdk"] = int(match.group(1))
         return info
 
     def _apksigner_findings(
@@ -2026,16 +2158,26 @@ class Stage1StaticRunner:
         if not stdout_path.exists():
             return findings
         for line in stdout_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            # Пропустить string-match-detail строки (формат: 0xOFFSET:$STRING_ID: matched_data)
+            first_token = line.split(maxsplit=1)[0]
+            if ":" in first_token:
+                continue
             parts = line.split(maxsplit=1)
             if len(parts) != 2:
                 continue
             rule_name, file_path = parts[0].strip(), parts[1].strip()
+            # Валидное имя YARA-правила: только буквы, цифры, _
+            if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', rule_name):
+                continue
             mapping = self.YARA_RULE_CATEGORY.get(rule_name)
             if mapping:
                 category, tags = mapping
             else:
                 # Fallback для пользовательских/неизвестных YARA-правил
-                category = f"yara_custom_{rule_name.lower()}"
+                category = f"yara_unknown_{rule_name.lower()}"
                 tags = set()
             findings.append(
                 self._make_finding(
@@ -2091,7 +2233,94 @@ class Stage1StaticRunner:
         findings = self._apply_download_execute(findings, run_dir)
         findings = self._apply_persistence_boost(findings)
         findings = self._apply_combo_boosts(findings)
+        findings.extend(self._extract_cleartext_http_findings(findings, run_dir))
+        findings.extend(self._correlate_intent_injection(findings, run_dir))
         return self._dedupe_findings(findings)
+
+    def _extract_cleartext_http_findings(self, findings: list[Finding], run_dir: Path) -> list[Finding]:
+        """Из secret_endpoints_hardcoded выделить http:// endpoints как отдельную категорию."""
+        from urllib.parse import urlparse
+
+        NOISE_HOSTS = {
+            "localhost", "127.0.0.1", "10.0.2.2", "10.0.3.2",
+            "0.0.0.0", "example.com", "example.org",
+            "schemas.android.com", "www.w3.org",
+            "ns.adobe.com", "xmlpull.org",
+        }
+        new_findings: list[Finding] = []
+        for f in findings:
+            if f.category != "secret_endpoints_hardcoded":
+                continue
+            evidence = (f.evidence or f.match or "").strip()
+            if not evidence.startswith("http://"):
+                continue
+            try:
+                host = urlparse(evidence).hostname or ""
+            except Exception:
+                continue
+            if host.lower() in NOISE_HOSTS:
+                continue
+            if host.startswith("10.") or host.startswith("192.168.") or host.startswith("172."):
+                continue
+            new_findings.append(
+                self._make_finding(
+                    FindingSpec(
+                        category="sec_cleartext_http_endpoint",
+                        evidence=evidence,
+                        file_path=f.file_path or "",
+                        line=f.line,
+                        column=f.column,
+                        confidence="C2",
+                        evidence_type="string",
+                        tags={"network", "mitm_enabler"},
+                        sources=f.sources or ["rg:endpoint_url"],
+                        source=f.source,
+                    ),
+                    run_dir=run_dir,
+                )
+            )
+        return new_findings
+
+    def _correlate_intent_injection(self, findings: list[Finding], run_dir: Path) -> list[Finding]:
+        """Exported component + getStringExtra в том же классе → intent injection indicator."""
+        exported_classes: set[str] = set()
+        for f in findings:
+            if f.category != "vul_exported_component_no_permission":
+                continue
+            evidence = f.evidence or ""
+            if ":" in evidence:
+                class_fqn = evidence.split(":")[1].split()[0]
+                short_name = class_fqn.rsplit(".", 1)[-1]
+                exported_classes.add(short_name)
+
+        if not exported_classes:
+            return []
+
+        new_findings: list[Finding] = []
+        for f in findings:
+            if f.category != "sec_intent_extra_read":
+                continue
+            file_path = f.file_path or ""
+            file_name = Path(file_path).stem
+            if file_name in exported_classes:
+                new_findings.append(
+                    self._make_finding(
+                        FindingSpec(
+                            category="sec_intent_injection_in_exported",
+                            evidence=f"Exported {file_name}: reads intent extras without validation",
+                            file_path=f.file_path or "",
+                            line=f.line,
+                            column=f.column,
+                            confidence="C2",
+                            evidence_type="code",
+                            tags={"exported"},
+                            sources=["correlation:exported+extras"],
+                            source="correlation:exported+extras",
+                        ),
+                        run_dir=run_dir,
+                    )
+                )
+        return new_findings
 
     def _aggregate_reflection_findings(self, findings: list[Finding], run_dir: Path) -> list[Finding]:
         reflection = [finding for finding in findings if finding.category == "ndv_reflection_heavy"]
@@ -2166,7 +2395,13 @@ class Stage1StaticRunner:
             "persist_jobscheduler_periodic",
             "persist_alarmmanager_repeating",
         }
-        has_persistence = any(f.category in persistence_categories for f in findings)
+        # Persistence boost срабатывает только от app-scope findings (не из библиотек)
+        has_persistence = any(
+            f.category in persistence_categories
+            and "lib_noise" not in (f.tags or set())
+            and not self._is_lib_path(f.file_path or "")
+            for f in findings
+        )
         if not has_persistence:
             return findings
         for finding in findings:
@@ -2176,6 +2411,9 @@ class Stage1StaticRunner:
                 source.startswith("rg:endpoint_")
                 for source in (finding.sources or [])
             ):
+                continue
+            # Не добавлять persistence к findings из библиотек
+            if self._is_lib_path(finding.file_path or ""):
                 continue
             finding.tags.add("persistence")
         return findings
