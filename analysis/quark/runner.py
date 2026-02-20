@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -13,7 +14,7 @@ from analysis.runtime.context import RunContext
 from analysis.runtime.exec import run_command_capture
 from analysis.runtime.fs import clear_tool_dir, write_tool_bundle
 from analysis.settings import SETTINGS_DIR
-from analysis.models.quark import QuarkReport, QuarkSummary
+from analysis.models.quark import QuarkReport, QuarkRuleResult, QuarkSummary
 
 
 DEFAULT_RULES_DIR = SETTINGS_DIR / "quark-rules"
@@ -24,7 +25,9 @@ QUARK_COMMAND = "quark"
 @dataclass
 class QuarkConfig:
     rules_dir: Path | None = None
-    timeout_sec: int = 120
+    timeout_sec: int = 600              # legacy fallback (backward compat)
+    per_rule_timeout_sec: int = 60      # таймаут на одно правило
+    max_rules: int | None = None        # для отладки — обработать первые N правил
 
 
 class QuarkRunner:
@@ -44,6 +47,7 @@ class QuarkRunner:
         ctx: RunContext | None = None,
     ) -> QuarkReport:
         report = QuarkReport(status="skipped")
+
         if shutil.which(QUARK_COMMAND) is None:
             report.status = "missing"
             self._append_report_error(report, "quark executable not found in PATH.")
@@ -51,7 +55,6 @@ class QuarkRunner:
 
         if ctx is not None:
             clear_tool_dir(ctx, "quark")
-            clear_tool_dir(ctx, "quark_retry")
 
         rules_dir = self._ensure_rules_dir()
         if not rules_dir:
@@ -63,119 +66,75 @@ class QuarkRunner:
         if not rules_path.is_dir():
             rules_path = rules_dir
         report.rules_dir = str(rules_path)
-
         out_dir.mkdir(parents=True, exist_ok=True)
-        rules_dir_rel = self._relpath(run_dir, rules_path) + "/"
-        summary_artifacts = (
-            dict(report.summary.artifacts) if isinstance(report.summary.artifacts, dict) else {}
-        )
-        summary_artifacts["rules_dir"] = rules_dir_rel
-        report.summary.artifacts = summary_artifacts
 
-        def _execute(command: list[str], tool_name: str, timeout_sec: float | None) -> tuple[str, str, int]:
-            stdout_handle = None
-            stderr_handle = None
-            stdout_cb = None
-            stderr_cb = None
-            if ctx is not None:
-                tool_root = ctx.run_dir / "tools" / tool_name
-                tool_root.mkdir(parents=True, exist_ok=True)
-                stdout_path = tool_root / "stdout.txt"
-                stderr_path = tool_root / "stderr.txt"
-                stdout_handle = stdout_path.open("w", encoding="utf-8")
-                stderr_handle = stderr_path.open("w", encoding="utf-8")
-
-                def _stdout_cb(line: str) -> None:
-                    stdout_handle.write(line + "\n")
-                    stdout_handle.flush()
-                    if self.on_progress:
-                        self.on_progress(line)
-
-                def _stderr_cb(line: str) -> None:
-                    stderr_handle.write(line + "\n")
-                    stderr_handle.flush()
-                    if self.on_progress:
-                        self.on_progress(line)
-
-                stdout_cb = _stdout_cb
-                stderr_cb = _stderr_cb
-            else:
-                stdout_cb = self._emit
-                stderr_cb = self._emit
-            try:
-                stdout, stderr, return_code = self._run_rule(
-                    command,
-                    stdout_cb=stdout_cb,
-                    stderr_cb=stderr_cb,
-                    timeout_sec=timeout_sec,
-                )
-            except subprocess.TimeoutExpired as exc:
-                stdout = self._safe_text(getattr(exc, "stdout", None) or getattr(exc, "output", None))
-                stderr = self._safe_text(getattr(exc, "stderr", None))
-                if stderr:
-                    stderr = stderr.rstrip("\n") + "\n"
-                if timeout_sec is not None:
-                    stderr += f"Timeout after {timeout_sec}s"
-                else:
-                    stderr += "Timeout"
-                return_code = 1
-            finally:
-                if stdout_handle:
-                    stdout_handle.close()
-                if stderr_handle:
-                    stderr_handle.close()
-            return stdout, stderr, return_code
+        # Собрать список правил
+        rule_files = sorted(rules_path.glob("*.json"))
+        if not rule_files:
+            report.status = "missing_rules"
+            self._append_report_error(report, f"No *.json rules found in {rules_path}")
+            return report
+        if self.config.max_rules is not None:
+            rule_files = rule_files[: self.config.max_rules]
 
         output_json_path = out_dir / "quark_output.json"
-        base_cmd = [
-            QUARK_COMMAND,
-            "-r",
-            str(rules_path),
-            "-a",
-            str(apk_path),
-            "--output",
-            str(output_json_path),
-        ]
-        cmd = list(base_cmd)
-
-        output_text_path = out_dir / "quark_output.txt"
-        self._emit("Running Quark rules directory...")
+        self._emit(f"Found {len(rule_files)} Quark rules. Starting per-rule analysis...")
         tool_started_at = now_utc_iso() if ctx is not None else None
-        stdout, stderr, return_code = _execute(cmd, "quark", self.config.timeout_sec)
-        tool_finished_at = now_utc_iso() if ctx is not None else None
-        output_text = (stdout or "") + ("\n" + stderr if stderr else "")
-        output_text_path.write_text(output_text, encoding="utf-8")
-        if stdout and not output_json_path.exists():
-            try:
-                json.loads(stdout)
-                output_json_path.write_text(stdout, encoding="utf-8")
-            except (json.JSONDecodeError, OSError, ValueError):
-                pass
-        output_json_artifact = None
-        if ctx is not None and output_json_path.exists():
-            tool_output_json = ctx.run_dir / "tools" / "quark" / "quark_output.json"
-            tool_output_json.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                shutil.copy2(output_json_path, tool_output_json)
-                output_json_artifact = self._relpath(ctx.run_dir, tool_output_json)
-            except OSError:
-                output_json_artifact = self._relpath(ctx.run_dir, output_json_path)
 
-        if return_code == 0:
+        # Per-rule запуск
+        crimes, apk_meta, stats = self._run_per_rule(
+            apk_path=apk_path,
+            rule_files=rule_files,
+            out_dir=out_dir,
+        )
+        tool_finished_at = now_utc_iso() if ctx is not None else None
+
+        # Агрегированный JSON (формат идентичен directory mode)
+        total_score = sum(c.get("score", 0) for c in crimes)
+        combined = {
+            "md5": apk_meta.get("md5", ""),
+            "apk_filename": apk_meta.get("apk_filename", apk_path.name),
+            "size_bytes": apk_meta.get("size_bytes", 0),
+            "threat_level": self._compute_threat_level(total_score),
+            "total_score": round(total_score, 4),
+            "crimes": crimes,
+        }
+        output_json_path.write_text(
+            json.dumps(combined, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+        # Статус
+        if stats["failed"] == 0:
             report.status = "ok"
+        elif stats["total"] - stats["failed"] - stats["skipped"] > 0:
+            report.status = "ok"
+            self._append_report_error(
+                report,
+                f"{stats['failed']} rules failed ({stats['timed_out']} timeout, {stats['oom']} OOM)",
+            )
         else:
             report.status = "fail"
-            reason = f"quark exited with code {return_code}"
-            stderr_first = (stderr or "").strip().splitlines()
-            if stderr_first:
-                reason = f"{reason}: {stderr_first[0]}"
-            self._append_report_error(report, reason)
+            self._append_report_error(report, "All rules failed.")
+
+        # Summary
+        matches = []
+        for crime in crimes:
+            if self._is_matched(crime):
+                matches.append(
+                    QuarkRuleResult(
+                        rule_name=crime.get("crime", ""),
+                        rule_path=crime.get("rule", ""),
+                        matched=True,
+                    )
+                )
+
         report.summary = QuarkSummary(
-            rules_total=0,
-            rules_matched=0,
-            rules_failed=0,
-            rules_skipped=0,
-            matches=[],
+            rules_total=stats["total"],
+            rules_matched=len(matches),
+            rules_failed=stats["failed"],
+            rules_skipped=stats["skipped"],
+            rules_timed_out=stats["timed_out"],
+            matches=matches,
             artifacts={
                 "outputs_dir": self._relpath(run_dir, out_dir) + "/",
                 **(
@@ -185,33 +144,227 @@ class QuarkRunner:
                 ),
             },
         )
-        primary_index = None
-        if ctx is not None and tool_started_at is not None and tool_finished_at is not None:
+
+        # Tool bundle
+        if ctx is not None and tool_started_at and tool_finished_at:
             artifacts: dict[str, str] = {}
             if out_dir.exists():
                 artifacts["outputs_dir"] = self._relpath(ctx.run_dir, out_dir) + "/"
-            if output_json_artifact:
-                artifacts["output_json"] = output_json_artifact
+            if output_json_path.exists():
+                artifacts["output_json"] = self._relpath(ctx.run_dir, output_json_path)
+            per_rule_log = out_dir / "per_rule_log.jsonl"
+            if per_rule_log.exists():
+                artifacts["per_rule_log"] = self._relpath(ctx.run_dir, per_rule_log)
+
             primary_index = write_tool_bundle(
                 ctx,
                 "quark",
-                cmd,
+                ["quark", "per-rule-mode", f"{len(rule_files)}-rules"],
                 tool_started_at,
                 tool_finished_at,
-                return_code,
-                stdout or "",
-                stderr or "",
+                0 if report.status == "ok" else 1,
+                "",
+                "",
                 artifacts,
             )
-
-        if ctx is not None:
-            tools_index = ctx.meta.setdefault("tools_index", [])
-            tools_index[:] = [
-                entry for entry in tools_index if entry.get("tool") not in ("quark", "quark_retry")
-            ]
             if primary_index:
+                tools_index = ctx.meta.setdefault("tools_index", [])
+                tools_index[:] = [e for e in tools_index if e.get("tool") != "quark"]
                 tools_index.append(primary_index)
+
         return report
+
+    def _run_per_rule(
+        self,
+        apk_path: Path,
+        rule_files: list[Path],
+        out_dir: Path,
+    ) -> tuple[list[dict], dict, dict]:
+        """
+        Запустить каждое правило в отдельном subprocess.
+        Каждый процесс: quark -r <rule.json> -a <apk> --output <tmp.json>
+        После exit процесса ОС освобождает всю его память.
+
+        Returns:
+            crimes:   list[dict] — собранные crime-записи
+            apk_meta: dict       — md5, apk_filename, size_bytes (из первого успешного)
+            stats:    dict       — total, matched, failed, skipped, timed_out, oom
+        """
+        crimes: list[dict] = []
+        apk_meta: dict = {}
+        stats = {
+            "total": len(rule_files),
+            "matched": 0,
+            "failed": 0,
+            "skipped": 0,
+            "timed_out": 0,
+            "oom": 0,
+        }
+
+        per_rule_timeout = self.config.per_rule_timeout_sec
+        tmp_dir = out_dir / "_per_rule_tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+
+        log_path = out_dir / "per_rule_log.jsonl"
+        log_handle = log_path.open("w", encoding="utf-8")
+
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+
+        MAX_CONSECUTIVE_FAILURES = 10
+        consecutive_failures = 0
+
+        for idx, rule_path in enumerate(rule_files):
+            rule_name = rule_path.stem
+            progress_pct = int((idx / len(rule_files)) * 100)
+
+            self._emit(f"QUARK_RULE:{idx + 1}/{len(rule_files)}:{rule_name}")
+            self._emit(f"{progress_pct}%")
+
+            rule_output = tmp_dir / f"{rule_name}.json"
+            cmd = [
+                QUARK_COMMAND,
+                "-r", str(rule_path),
+                "-a", str(apk_path),
+                "--output", str(rule_output),
+            ]
+
+            entry: dict = {
+                "rule": rule_name,
+                "rule_file": rule_path.name,
+                "status": "pending",
+                "exit_code": None,
+                "duration_sec": None,
+                "error": None,
+                "oom_detected": False,
+            }
+
+            try:
+                start = time.monotonic()
+                exit_code, _stdout, stderr = run_command_capture(
+                    cmd,
+                    env=env,
+                    timeout=per_rule_timeout,
+                    kill_process_group=True,
+                )
+                entry["duration_sec"] = round(time.monotonic() - start, 2)
+                entry["exit_code"] = exit_code
+
+                # OOM detection (exit 137 = SIGKILL, или "Killed" в stderr)
+                is_oom = exit_code in (137, 9) or "Killed" in (stderr or "")
+                entry["oom_detected"] = is_oom
+
+                if is_oom:
+                    entry["status"] = "oom"
+                    entry["error"] = f"OOM-like termination (exit {exit_code})"
+                    stats["oom"] += 1
+                    stats["failed"] += 1
+                    consecutive_failures += 1
+                    self._emit(f"  Rule {rule_name}: OOM (exit {exit_code})")
+
+                elif exit_code == 0 and rule_output.exists():
+                    try:
+                        data = json.loads(rule_output.read_text(encoding="utf-8"))
+                        rule_crimes = data.get("crimes", [])
+
+                        if not apk_meta:
+                            apk_meta = {
+                                k: data.get(k, "")
+                                for k in ("md5", "apk_filename", "size_bytes")
+                            }
+
+                        crimes.extend(rule_crimes)
+                        entry["status"] = "ok"
+                        consecutive_failures = 0
+
+                    except (json.JSONDecodeError, OSError) as exc:
+                        entry["status"] = "parse_error"
+                        entry["error"] = str(exc)[:200]
+                        stats["failed"] += 1
+                        consecutive_failures += 1
+
+                elif exit_code != 0:
+                    entry["status"] = "error"
+                    entry["error"] = (stderr or "").strip()[:200]
+                    stats["failed"] += 1
+                    consecutive_failures += 1
+
+                else:
+                    # exit 0, но нет output файла
+                    entry["status"] = "no_output"
+                    stats["skipped"] += 1
+                    consecutive_failures += 1
+
+            except subprocess.TimeoutExpired:
+                entry["status"] = "timeout"
+                entry["duration_sec"] = per_rule_timeout
+                stats["timed_out"] += 1
+                stats["failed"] += 1
+                consecutive_failures += 1
+                self._emit(f"  Rule {rule_name}: timeout ({per_rule_timeout}s)")
+
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                entry["status"] = "exception"
+                entry["error"] = str(exc)[:200]
+                stats["failed"] += 1
+                consecutive_failures += 1
+
+            finally:
+                log_handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                log_handle.flush()
+                # Удалить tmp output сразу — экономия диска
+                if rule_output.exists():
+                    try:
+                        rule_output.unlink()
+                    except OSError:
+                        pass
+
+            # Early exit при каскадных ошибках
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                remaining = len(rule_files) - idx - 1
+                self._emit(
+                    f"Aborting: {MAX_CONSECUTIVE_FAILURES} consecutive failures. "
+                    f"Skipping remaining {remaining} rules."
+                )
+                stats["skipped"] += remaining
+                break
+
+        log_handle.close()
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        # Подсчитать matched
+        for c in crimes:
+            if self._is_matched(c):
+                stats["matched"] += 1
+
+        self._emit("100%")
+        self._emit(
+            f"Quark done: {stats['matched']} matched, "
+            f"{stats['failed']} failed ({stats['timed_out']} timeout, {stats['oom']} OOM), "
+            f"{stats['total']} total"
+        )
+        return crimes, apk_meta, stats
+
+    @staticmethod
+    def _is_matched(crime: dict) -> bool:
+        """Правило считается сработавшим если confidence >= 60% или score > 0."""
+        conf_str = crime.get("confidence", "0%")
+        try:
+            conf_val = int(conf_str.replace("%", ""))
+        except (ValueError, AttributeError):
+            conf_val = 0
+        return conf_val >= 60 or crime.get("score", 0) > 0
+
+    @staticmethod
+    def _compute_threat_level(total_score: float) -> str:
+        """Воспроизвести логику Quark для threat_level."""
+        if total_score >= 80:
+            return "High Risk"
+        if total_score >= 40:
+            return "Moderate Risk"
+        if total_score >= 1:
+            return "Low Risk"
+        return "Safe"
 
     def _ensure_rules_dir(self) -> Path | None:
         target = self.config.rules_dir or DEFAULT_RULES_DIR
@@ -223,41 +376,9 @@ class QuarkRunner:
             return target
         return None
 
-    def _run_rule(
-        self,
-        cmd: list[str],
-        stdout_cb: Callable[[str], None] | None = None,
-        stderr_cb: Callable[[str], None] | None = None,
-        timeout_sec: float | None = None,
-    ) -> tuple[str, str, int]:
-        env = os.environ.copy()
-        env.setdefault("PYTHONUNBUFFERED", "1")
-        exit_code, stdout, stderr = run_command_capture(
-            cmd,
-            env=env,
-            timeout=timeout_sec,
-            stdout_cb=stdout_cb,
-            stderr_cb=stderr_cb,
-        )
-        return stdout or "", stderr or "", exit_code
-
-    def _safe_text(self, value: str | bytes | bytearray | memoryview | None) -> str:
-        if value is None:
-            return ""
-        if isinstance(value, str):
-            return value
-        if isinstance(value, memoryview):
-            value = value.tobytes()
-        if isinstance(value, (bytes, bytearray)):
-            return bytes(value).decode("utf-8", errors="replace")
-        return str(value)
-
     def _emit(self, message: str) -> None:
         if self.on_progress:
             self.on_progress(message)
-
-    def _safe_name(self, value: str) -> str:
-        return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in value).strip("_")
 
     def _relpath(self, run_dir: Path, path: Path) -> str:
         try:

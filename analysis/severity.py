@@ -60,6 +60,13 @@ class SeverityEngine:
         "sec_broadcast_receiver_no_permission": 3,
         "sec_intent_extra_read": 1,
         "sec_intent_injection_in_exported": 3,
+        "sec_webview_js_enabled": 1,
+        "sec_webview_file_xss": 3,
+        "sec_implicit_broadcast_send": 3,
+        "sec_cleartext_http_protocol": 3,
+        "sec_deprecated_http_client": 2,
+        "sec_hardcoded_crypto_key": 4,
+        "sec_static_iv": 3,
         # --- vul_* ---
         "vul_exported_component_no_permission": 3,
         "vul_exported_provider_risky": 4,
@@ -119,6 +126,7 @@ class SeverityEngine:
         "ndv_remote_command_shell": "medium",
         "ndv_dynamic_code_loading_dex": "medium",
         "secret_hardcoded_credentials": "medium",
+        "sec_hardcoded_crypto_key": "medium",
         "ndv_payload_decode_load": "high",
         "supplychain_debug_certificate": "medium",
     }

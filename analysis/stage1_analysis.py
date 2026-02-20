@@ -398,14 +398,27 @@ class Stage1StaticRunner:
             "tags": set(),
             "source": "emulator_detection",
         },
+        # --- Root detection ---
         {
-            "category": "anomaly_anti_debug",
-            "pattern": r"(?i)(?:/system/(?:bin|xbin)/su\b|\bBuild\.(?:FINGERPRINT|MODEL)\b|\bDebug\.isDebuggerConnected\b|\bTracerPid\b)",
+            "category": "anomaly_root_detection",
+            "pattern": r'/system/(?:bin|xbin)/(?:su|which)\b|/su\b|/data/local/tmp|Superuser\.apk|eu\.chainfire\.supersu|com\.topjohnwu\.magisk|RootTools|RootBeer|isDeviceRooted|checkForSuBinary',
             "targets": ("jadx",),
+            "scope": "app",
             "confidence": "C2",
             "evidence_type": "code",
             "tags": set(),
-            "source": "analysis_evasion",
+            "source": "root_detection",
+        },
+        # --- Anti-debug patterns ---
+        {
+            "category": "anomaly_anti_debug",
+            "pattern": r'\bDebug\.isDebuggerConnected\b|\bTracerPid\b|\bandroid\.os\.Debug\b|ptrace\s*\(\s*PTRACE_TRACEME',
+            "targets": ("jadx",),
+            "scope": "app",
+            "confidence": "C2",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "anti_debug",
         },
         # --- Небезопасная криптография ---
         {
@@ -486,6 +499,17 @@ class Stage1StaticRunner:
             "evidence_type": "code",
             "tags": set(),
             "source": "sharedprefs_sensitive",
+        },
+        # --- SharedPreferences + секреты (split-variable: editor.putString("key", ...)) ---
+        {
+            "category": "sec_sharedprefs_sensitive",
+            "pattern": r'\.putString\(\s*"[^"]*(?i:password|token|secret|api.?key|private.?key|credential|encrypt)[^"]*"\s*,',
+            "targets": ("jadx",),
+            "scope": "app",
+            "confidence": "C1",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "sharedprefs_sensitive_split",
         },
         # --- SMS sending ---
         {
@@ -590,7 +614,7 @@ class Stage1StaticRunner:
         # --- Hardcoded credentials (Java/Kotlin) ---
         {
             "category": "secret_hardcoded_credentials",
-            "pattern": r'(?i)(?:password|passwd|pwd|passphrase|credentials?|secret)\s*=\s*"[^"]{4,}"',
+            "pattern": r'(?i)(?:password|passwd|pwd|passphrase|credentials?|secret|username|login|user_?name)\s*=\s*"[^"]{4,}"',
             "targets": ("jadx",),
             "scope": "app",
             "confidence": "C2",
@@ -601,7 +625,7 @@ class Stage1StaticRunner:
         # --- Hardcoded credentials (smali/resources) ---
         {
             "category": "secret_hardcoded_credentials",
-            "pattern": r'(?i)(?:password|passwd|pwd|passphrase|default_?password|admin_?pass)\s*[:=]\s*["\x27][^\s"\']{4,}',
+            "pattern": r'(?i)(?:password|passwd|pwd|passphrase|default_?password|admin_?pass)\s*[:=]\s*["\x27](?!@|#ff|0x|android)[^\s"\']{4,}',
             "targets": ("apktool",),
             "scope": "app_res",
             "confidence": "C2",
@@ -623,13 +647,90 @@ class Stage1StaticRunner:
         # --- Intent extras read (auxiliary, for correlation) ---
         {
             "category": "sec_intent_extra_read",
-            "pattern": r"getIntent\(\)\.get(?:String|Int|Boolean|Serializable|Parcelable)?Extra\(|\.getExtras\(\)",
+            "pattern": r"\.get(?:String|Int|Boolean|Long|Float|Double|Char|Short|Byte|Serializable|Parcelable)?Extra\(|\.getExtras\(\)",
             "targets": ("jadx",),
             "scope": "app",
             "confidence": "C1",
             "evidence_type": "code",
             "tags": set(),
             "source": "intent_extra_read",
+        },
+        # --- WebView JavaScript enabled ---
+        {
+            "category": "sec_webview_js_enabled",
+            "pattern": r"\.setJavaScriptEnabled\(\s*true\s*\)",
+            "targets": ("jadx",),
+            "scope": "app",
+            "confidence": "C1",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "webview_js_enabled",
+        },
+        # --- Implicit broadcast without receiver restriction ---
+        {
+            "category": "sec_implicit_broadcast_send",
+            "pattern": r"\bsendBroadcast\(\s*\w+\s*\)|\bsendOrderedBroadcast\(\s*\w+\s*,\s*null\s*\)",
+            "targets": ("jadx",),
+            "scope": "app",
+            "confidence": "C2",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "implicit_broadcast",
+        },
+        # --- Cleartext HTTP protocol declaration ---
+        {
+            "category": "sec_cleartext_http_protocol",
+            "pattern": r'(?i)\bprotocol\s*=\s*"http://"|new\s+HttpPost\(\s*"http://|new\s+URL\(\s*"http://|\.openConnection\(\s*"http://',
+            "targets": ("jadx",),
+            "scope": "app",
+            "confidence": "C2",
+            "evidence_type": "code",
+            "tags": {"network", "mitm_enabler"},
+            "source": "cleartext_http_protocol",
+        },
+        # --- Deprecated Apache HTTP client (no TLS guarantees) ---
+        {
+            "category": "sec_deprecated_http_client",
+            "pattern": r"\bDefaultHttpClient\(\)|new\s+DefaultHttpClient\b|HttpClientBuilder\.create\(\)\.build\(\)",
+            "targets": ("jadx",),
+            "scope": "app",
+            "confidence": "C1",
+            "evidence_type": "code",
+            "tags": {"network"},
+            "source": "deprecated_http_client",
+        },
+        # --- Hardcoded crypto key (specific naming) ---
+        {
+            "category": "sec_hardcoded_crypto_key",
+            "pattern": r'(?i)(?:secret.?key|crypto.?key|aes.?key|encryption.?key|signing.?key|hmac.?key)\s*=\s*"[^"]{8,}"|SecretKeySpec\(\s*"[^"]{8,}"\.getBytes',
+            "targets": ("jadx",),
+            "scope": "app",
+            "confidence": "C2",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "hardcoded_crypto_key",
+        },
+        # --- Static/zero IV ---
+        {
+            "category": "sec_static_iv",
+            "pattern": r'(?i)iv(?:Bytes|Spec|Parameter|_bytes)?\s*=\s*(?:\{(?:\s*0\s*,){7,}|new\s+byte\[\s*\d+\s*\]|"(?:0{16,}|00000000))',
+            "targets": ("jadx",),
+            "scope": "app",
+            "confidence": "C2",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "static_iv",
+        },
+        # --- Hardcoded key via field name "key" (broader, C1) ---
+        {
+            "category": "sec_hardcoded_crypto_key",
+            "pattern": r'(?:String|byte\[\]|final)\s+key\s*=\s*"[^"]{16,}"',
+            "targets": ("jadx",),
+            "scope": "app",
+            "confidence": "C1",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "hardcoded_key_field",
         },
     ]
     STRINGS_PATTERN_STRINGS = {
@@ -2179,6 +2280,11 @@ class Stage1StaticRunner:
                 # Fallback для пользовательских/неизвестных YARA-правил
                 category = f"yara_unknown_{rule_name.lower()}"
                 tags = set()
+            finding_confidence = "C2"
+            finding_tags = set(tags)
+            if self._is_lib_path(file_path):
+                finding_tags.add("lib_noise")
+                finding_confidence = "C1"
             findings.append(
                 self._make_finding(
                     FindingSpec(
@@ -2187,9 +2293,9 @@ class Stage1StaticRunner:
                         file_path=file_path,
                         line=None,
                         column=None,
-                        confidence="C2",
+                        confidence=finding_confidence,
                         evidence_type="code",
-                        tags=set(tags),
+                        tags=finding_tags,
                         sources=[f"yara:{rule_name}"],
                         source=f"yara:{rule_name}",
                     ),
@@ -2235,6 +2341,7 @@ class Stage1StaticRunner:
         findings = self._apply_combo_boosts(findings)
         findings.extend(self._extract_cleartext_http_findings(findings, run_dir))
         findings.extend(self._correlate_intent_injection(findings, run_dir))
+        findings.extend(self._correlate_webview_file_xss(findings, run_dir))
         return self._dedupe_findings(findings)
 
     def _extract_cleartext_http_findings(self, findings: list[Finding], run_dir: Path) -> list[Finding]:
@@ -2321,6 +2428,35 @@ class Stage1StaticRunner:
                     )
                 )
         return new_findings
+
+    def _correlate_webview_file_xss(self, findings: list[Finding], run_dir: Path) -> list[Finding]:
+        """WebView JS enabled + external storage file:// loadUrl → XSS risk."""
+        has_js_enabled = any(f.category == "sec_webview_js_enabled" for f in findings)
+        has_file_url = any(
+            f.category == "sec_external_storage_sensitive"
+            and "loadUrl" in (f.evidence or f.match or "")
+            for f in findings
+        )
+        if not (has_js_enabled and has_file_url):
+            return []
+        js_finding = next(f for f in findings if f.category == "sec_webview_js_enabled")
+        return [
+            self._make_finding(
+                FindingSpec(
+                    category="sec_webview_file_xss",
+                    evidence="WebView JS enabled + loadUrl(file://) from external storage",
+                    file_path=js_finding.file_path or "",
+                    line=js_finding.line,
+                    column=js_finding.column,
+                    confidence="C2",
+                    evidence_type="code",
+                    tags=set(),
+                    sources=["correlation:webview_js+file_url"],
+                    source="correlation:webview_js+file_url",
+                ),
+                run_dir=run_dir,
+            )
+        ]
 
     def _aggregate_reflection_findings(self, findings: list[Finding], run_dir: Path) -> list[Finding]:
         reflection = [finding for finding in findings if finding.category == "ndv_reflection_heavy"]

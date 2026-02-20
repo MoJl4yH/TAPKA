@@ -55,7 +55,7 @@ class Stage3Config:
     view_source: bool = False
     frida_steps: bool = False
     tls_tests: bool = False
-    quark_timeout_sec: int = 120
+    quark_timeout_sec: int = 1800
     quark_rules_dir: str | None = None
     view_source_files: list[tuple[str, str]] = field(default_factory=list)
     dynamic_view_source_files: list[tuple[str, str]] = field(default_factory=list)

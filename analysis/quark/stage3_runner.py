@@ -24,8 +24,10 @@ from models import Run
 
 @dataclass
 class Stage3QuarkConfig:
-    quark_timeout_sec: int = 600
+    quark_timeout_sec: int = 1800               # legacy (backward compat)
+    quark_per_rule_timeout_sec: int = 60        # таймаут на одно правило
     quark_rules_dir: str | None = None
+    quark_max_rules: int | None = None          # для отладки — первые N правил
 
 
 class Stage3QuarkRunner:
@@ -52,15 +54,20 @@ class Stage3QuarkRunner:
         try:
             ensure_apk_ready(apk_path)
             quark_report = self._run_quark(apk_path, quark_dir, run_dir, log, ctx=ctx)
-            if quark_report.status != "ok":
-                raise RuntimeError(f"Quark analysis status: {quark_report.status}")
-
             run.status = "Done"
+            if quark_report.status != "ok":
+                run.status = "Error"
+                error_message = self._quark_failure_message(quark_report)
+                append_run_error(run, error_message)
+                log(error_message)
             run.finished_at = datetime.now().isoformat(timespec="seconds")
             report_manager = ReportManager(self.storage)
             _, html_path = report_manager.generate_stage3(run, run_dir, None, quark_report)
             run.report_path = str(html_path)
-            log("Stage3 Quark run completed.")
+            if run.status == "Done":
+                log("Stage3 Quark run completed.")
+            else:
+                log("Stage3 Quark run completed with errors.")
             return run
         except Exception as exc:  # pylint: disable=broad-exception-caught
             log(f"Stage3 Quark run failed: {exc}")
@@ -82,9 +89,14 @@ class Stage3QuarkRunner:
         log: Callable[[str], None],
         ctx: RunContext | None = None,
     ) -> QuarkReport:
-        emit_progress(self.on_progress, "Running Quark rules...")
+        emit_progress(self.on_progress, "Running Quark rules (per-rule mode)...")
         rules_dir = Path(self.config.quark_rules_dir) if self.config.quark_rules_dir else None
-        quark_config = QuarkConfig(rules_dir=rules_dir, timeout_sec=self.config.quark_timeout_sec)
+        quark_config = QuarkConfig(
+            rules_dir=rules_dir,
+            timeout_sec=self.config.quark_timeout_sec,
+            per_rule_timeout_sec=self.config.quark_per_rule_timeout_sec,
+            max_rules=self.config.quark_max_rules,
+        )
         runner = QuarkRunner(quark_config, on_progress=log)
         report = runner.run(
             apk_path,
@@ -95,3 +107,10 @@ class Stage3QuarkRunner:
         if report.status != "ok":
             log(f"Quark analysis status: {report.status}")
         return report
+
+    def _quark_failure_message(self, report: QuarkReport) -> str:
+        base = f"Quark analysis status: {report.status}"
+        details = [item.strip() for item in (report.errors or []) if isinstance(item, str) and item.strip()]
+        if not details:
+            return base
+        return f"{base}. {details[0]}"

@@ -16,6 +16,7 @@ class QuarkSummary(BaseModel):
     rules_matched: int = 0
     rules_failed: int = 0
     rules_skipped: int = 0
+    rules_timed_out: int = 0
     matches: list[QuarkRuleResult] = Field(default_factory=list)
     artifacts: dict[str, str] = Field(default_factory=dict)
 

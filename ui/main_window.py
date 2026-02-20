@@ -1517,29 +1517,59 @@ class MainWindow(QMainWindow):
     def _append_quark_log(self, message: str) -> None:
         if not self.quark_log_view:
             return
+
+        # Синтетический "N%" — обновить progress bar, не засорять лог
+        if re.fullmatch(r"\d{1,3}%", message.strip()):
+            try:
+                pct = max(0, min(100, int(message.strip().replace("%", ""))))
+                if self.quark_progress_bar:
+                    # Не переключать шкалу если уже в rule-mode (max > 100)
+                    if self.quark_progress_bar.maximum() <= 100:
+                        self.quark_progress_bar.setMaximum(100)
+                        self.quark_progress_bar.setValue(pct)
+            except ValueError:
+                pass
+            return
+
+        # Записать в лог-окно
         self.quark_log_view.appendPlainText(message)
         self.quark_log_view.verticalScrollBar().setValue(
             self.quark_log_view.verticalScrollBar().maximum()
         )
-        percent = None
-        match = re.search(r"(\d{1,3})%", message)
-        if match:
-            try:
-                percent = int(match.group(1))
-            except ValueError:
-                percent = None
-        if percent is not None:
-            if percent < 0:
-                percent = 0
-            if percent > 100:
-                percent = 100
+
+        # --- Per-rule progress: QUARK_RULE:N/TOTAL:name ---
+        rule_match = re.match(r"QUARK_RULE:(\d+)/(\d+):(.+)", message)
+        if rule_match:
+            current = int(rule_match.group(1))
+            total = int(rule_match.group(2))
+            rule_name = rule_match.group(3)
             if self.quark_progress_bar:
-                self.quark_progress_bar.setMaximum(100)
-                self.quark_progress_bar.setValue(percent)
+                self.quark_progress_bar.setMaximum(total)
+                self.quark_progress_bar.setValue(current)
             if self.quark_progress_label:
-                self.quark_progress_label.setText(f"Progress {percent}%")
-        elif self.quark_progress_label:
-            self.quark_progress_label.setText(message)
+                self.quark_progress_label.setText(f"Rule {current}/{total}: {rule_name}")
+            return
+
+        # --- Legacy: tqdm "N%" из stderr (backward compat) ---
+        pct_match = re.search(r"(\d{1,3})%", message)
+        if pct_match:
+            try:
+                pct = max(0, min(100, int(pct_match.group(1))))
+                if self.quark_progress_bar:
+                    self.quark_progress_bar.setMaximum(100)
+                    self.quark_progress_bar.setValue(pct)
+                if self.quark_progress_label:
+                    self.quark_progress_label.setText(f"Progress {pct}%")
+            except ValueError:
+                pass
+            return
+
+        # Обычное сообщение — показать в label, но не затирать rule progress
+        if self.quark_progress_label:
+            current_text = self.quark_progress_label.text()
+            if not current_text.startswith("Rule "):
+                display = message[-80:] if len(message) > 80 else message
+                self.quark_progress_label.setText(display)
 
     def _handle_mobsf_progress(self, message: str) -> None:
         prefix = "MOBSF_SCAN_STATUS:"
@@ -1826,12 +1856,25 @@ class MainWindow(QMainWindow):
         self.current_run_dir = self.storage.get_run_dir(run.project_id, run.run_id)
         self.status_badge.setText(run.status)
         self.project_run_label.setText(run.finished_at or run.started_at)
-        self._append_quark_log("Stage3 Quark run completed.")
-        if self.quark_progress_label and self.quark_progress_bar:
-            self.quark_progress_label.setText("Quark analysis completed")
-            self.quark_progress_bar.setValue(self.quark_progress_bar.maximum())
-        if self.quark_status_label:
-            self.quark_status_label.setText("Completed")
+        run_ok = run.status == "Done"
+        if run_ok:
+            self._append_quark_log("Stage3 Quark run completed.")
+            if self.quark_progress_label and self.quark_progress_bar:
+                self.quark_progress_label.setText("Quark analysis completed")
+                self.quark_progress_bar.setValue(self.quark_progress_bar.maximum())
+            if self.quark_status_label:
+                self.quark_status_label.setText("Completed")
+        else:
+            self._append_quark_log("Stage3 Quark run completed with errors.")
+            if run.errors:
+                self._append_quark_log(run.errors[-1])
+            if self.quark_progress_label and self.quark_progress_bar:
+                self.quark_progress_label.setText("Quark analysis completed with errors")
+                self.quark_progress_bar.setValue(self.quark_progress_bar.maximum())
+            if self.quark_status_label:
+                self.quark_status_label.setText("Failed")
+            details = "\n".join(run.errors) if run.errors else "Quark analysis completed with errors."
+            QMessageBox.warning(self, "Quark Stage3 completed with errors", details)
         self._update_mobsf_summary()
         self._load_latest_run()
         self._update_action_states()
