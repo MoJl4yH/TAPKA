@@ -25,8 +25,8 @@ QUARK_COMMAND = "quark"
 @dataclass
 class QuarkConfig:
     rules_dir: Path | None = None
-    timeout_sec: int = 600              # legacy fallback (backward compat)
-    per_rule_timeout_sec: int = 60      # таймаут на одно правило
+    timeout_sec: int = 600              # таймаут монолита
+    per_rule_timeout_sec: int = 60      # таймаут на одно правило в per-rule fallback
     max_rules: int | None = None        # для отладки — обработать первые N правил
 
 
@@ -68,7 +68,6 @@ class QuarkRunner:
         report.rules_dir = str(rules_path)
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        # Собрать список правил
         rule_files = sorted(rules_path.glob("*.json"))
         if not rule_files:
             report.status = "missing_rules"
@@ -78,94 +77,224 @@ class QuarkRunner:
             rule_files = rule_files[: self.config.max_rules]
 
         output_json_path = out_dir / "quark_output.json"
-        self._emit(f"Found {len(rule_files)} Quark rules. Starting per-rule analysis...")
         tool_started_at = now_utc_iso() if ctx is not None else None
 
-        # Per-rule запуск
-        crimes, apk_meta, stats = self._run_per_rule(
-            apk_path=apk_path,
-            rule_files=rule_files,
-            out_dir=out_dir,
+        # ── 1. Monolith run ──
+        self._emit(f"Running Quark rules directory ({len(rule_files)} rules)...")
+        monolith_cmd = [
+            QUARK_COMMAND,
+            "-r", str(rules_path),
+            "-a", str(apk_path),
+            "--output", str(output_json_path),
+        ]
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+
+        monolith_exit = 0
+        monolith_stdout = ""
+        monolith_stderr = ""
+        timed_out = False
+
+        try:
+            monolith_exit, monolith_stdout, monolith_stderr = run_command_capture(
+                monolith_cmd,
+                env=env,
+                timeout=self.config.timeout_sec,
+                stderr_cb=self._emit,
+                kill_process_group=True,
+            )
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            monolith_exit = 1
+            monolith_stderr = f"Timeout after {self.config.timeout_sec}s"
+            self._emit(f"Quark monolith timed out after {self.config.timeout_sec}s.")
+
+        # Сохранить stdout/stderr монолита в tool files
+        if ctx is not None:
+            tool_root = ctx.run_dir / "tools" / "quark"
+            tool_root.mkdir(parents=True, exist_ok=True)
+            (tool_root / "stdout.txt").write_text(monolith_stdout, encoding="utf-8")
+            (tool_root / "stderr.txt").write_text(monolith_stderr, encoding="utf-8")
+
+        # ── 2. OOM detection ──
+        is_oom = (
+            not timed_out
+            and (
+                monolith_exit in (137, 9)
+                or "Killed" in monolith_stderr
+                or (monolith_exit != 0 and not output_json_path.exists())
+            )
         )
+
+        if is_oom:
+            # ── 3. Per-rule fallback ──
+            self._emit(
+                f"Quark monolith killed (exit {monolith_exit}). "
+                f"Switching to per-rule mode..."
+            )
+            # Пометить в stderr.txt начало fallback-секции
+            if ctx is not None:
+                tool_root = ctx.run_dir / "tools" / "quark"
+                with (tool_root / "stderr.txt").open("a", encoding="utf-8") as fh:
+                    fh.write("\n\n=== PER-RULE FALLBACK ===\n")
+
+            self._emit(f"Found {len(rule_files)} Quark rules. Starting per-rule analysis...")
+            crimes, apk_meta, stats = self._run_per_rule(
+                apk_path=apk_path,
+                rule_files=rule_files,
+                out_dir=out_dir,
+            )
+            tool_finished_at = now_utc_iso() if ctx is not None else None
+
+            total_score = sum(c.get("score", 0) for c in crimes)
+            combined = {
+                "md5": apk_meta.get("md5", ""),
+                "apk_filename": apk_meta.get("apk_filename", apk_path.name),
+                "size_bytes": apk_meta.get("size_bytes", 0),
+                "threat_level": self._compute_threat_level(total_score),
+                "total_score": round(total_score, 4),
+                "crimes": crimes,
+            }
+            output_json_path.write_text(
+                json.dumps(combined, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+
+            if ctx is not None and output_json_path.exists():
+                tool_output = ctx.run_dir / "tools" / "quark" / "quark_output.json"
+                shutil.copy2(output_json_path, tool_output)
+
+            successful = stats["total"] - stats["failed"] - stats["skipped"]
+            if successful > 0:
+                report.status = "ok"
+                if stats["failed"] > 0:
+                    self._append_report_error(
+                        report,
+                        f"Per-rule fallback: {stats['failed']} failed "
+                        f"({stats['timed_out']} timeout, {stats['oom']} OOM)",
+                    )
+            else:
+                report.status = "fail"
+                self._append_report_error(report, "Per-rule fallback: all rules failed.")
+
+            matches = [
+                QuarkRuleResult(
+                    rule_name=c.get("crime", ""),
+                    rule_path=c.get("rule", ""),
+                    matched=True,
+                )
+                for c in crimes
+                if self._is_matched(c)
+            ]
+            report.summary = QuarkSummary(
+                rules_total=stats["total"],
+                rules_matched=len(matches),
+                rules_failed=stats["failed"],
+                rules_skipped=stats["skipped"],
+                rules_timed_out=stats["timed_out"],
+                matches=matches,
+                artifacts={
+                    "outputs_dir": self._relpath(run_dir, out_dir) + "/",
+                    **(
+                        {"output_json": self._relpath(run_dir, output_json_path)}
+                        if output_json_path.exists()
+                        else {}
+                    ),
+                },
+            )
+
+            if ctx is not None and tool_started_at and tool_finished_at:
+                artifacts_dict: dict[str, str] = {}
+                if out_dir.exists():
+                    artifacts_dict["outputs_dir"] = self._relpath(ctx.run_dir, out_dir) + "/"
+                if output_json_path.exists():
+                    artifacts_dict["output_json"] = self._relpath(ctx.run_dir, output_json_path)
+                per_rule_log = out_dir / "per_rule_log.jsonl"
+                if per_rule_log.exists():
+                    artifacts_dict["per_rule_log"] = self._relpath(ctx.run_dir, per_rule_log)
+                primary_index = write_tool_bundle(
+                    ctx,
+                    "quark",
+                    ["quark", "per-rule-fallback", f"{len(rule_files)}-rules"],
+                    tool_started_at,
+                    tool_finished_at,
+                    monolith_exit,
+                    monolith_stdout,
+                    monolith_stderr,
+                    artifacts_dict,
+                )
+                if primary_index:
+                    tools_index = ctx.meta.setdefault("tools_index", [])
+                    tools_index[:] = [
+                        e for e in tools_index
+                        if e.get("tool") not in ("quark", "quark_retry")
+                    ]
+                    tools_index.append(primary_index)
+
+            return report
+
+        # ── 4. Monolith: обработка результата (успех или обычная ошибка) ──
         tool_finished_at = now_utc_iso() if ctx is not None else None
 
-        # Агрегированный JSON (формат идентичен directory mode)
-        total_score = sum(c.get("score", 0) for c in crimes)
-        combined = {
-            "md5": apk_meta.get("md5", ""),
-            "apk_filename": apk_meta.get("apk_filename", apk_path.name),
-            "size_bytes": apk_meta.get("size_bytes", 0),
-            "threat_level": self._compute_threat_level(total_score),
-            "total_score": round(total_score, 4),
-            "crimes": crimes,
-        }
-        output_json_path.write_text(
-            json.dumps(combined, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-
-        # Статус
-        if stats["failed"] == 0:
-            report.status = "ok"
-        elif stats["total"] - stats["failed"] - stats["skipped"] > 0:
-            report.status = "ok"
+        if monolith_exit == 0 and output_json_path.exists():
+            try:
+                data = json.loads(output_json_path.read_text(encoding="utf-8"))
+                crimes = data.get("crimes", [])
+                report.status = "ok"
+                matches = [
+                    QuarkRuleResult(
+                        rule_name=c.get("crime", ""),
+                        rule_path=c.get("rule", ""),
+                        matched=True,
+                    )
+                    for c in crimes
+                    if self._is_matched(c)
+                ]
+                report.summary = QuarkSummary(
+                    rules_total=len(rule_files),
+                    rules_matched=len(matches),
+                    rules_failed=0,
+                    rules_skipped=0,
+                    rules_timed_out=0,
+                    matches=matches,
+                    artifacts={
+                        "outputs_dir": self._relpath(run_dir, out_dir) + "/",
+                        "output_json": self._relpath(run_dir, output_json_path),
+                    },
+                )
+            except (json.JSONDecodeError, OSError) as exc:
+                report.status = "fail"
+                self._append_report_error(report, f"Failed to parse monolith output: {exc}")
+        elif timed_out:
+            report.status = "fail"
             self._append_report_error(
-                report,
-                f"{stats['failed']} rules failed ({stats['timed_out']} timeout, {stats['oom']} OOM)",
+                report, f"Quark monolith timed out after {self.config.timeout_sec}s."
             )
         else:
             report.status = "fail"
-            self._append_report_error(report, "All rules failed.")
+            self._append_report_error(
+                report, f"Quark monolith failed (exit {monolith_exit})."
+            )
 
-        # Summary
-        matches = []
-        for crime in crimes:
-            if self._is_matched(crime):
-                matches.append(
-                    QuarkRuleResult(
-                        rule_name=crime.get("crime", ""),
-                        rule_path=crime.get("rule", ""),
-                        matched=True,
-                    )
-                )
+        if ctx is not None and output_json_path.exists():
+            tool_output = ctx.run_dir / "tools" / "quark" / "quark_output.json"
+            shutil.copy2(output_json_path, tool_output)
 
-        report.summary = QuarkSummary(
-            rules_total=stats["total"],
-            rules_matched=len(matches),
-            rules_failed=stats["failed"],
-            rules_skipped=stats["skipped"],
-            rules_timed_out=stats["timed_out"],
-            matches=matches,
-            artifacts={
-                "outputs_dir": self._relpath(run_dir, out_dir) + "/",
-                **(
-                    {"output_json": self._relpath(run_dir, output_json_path)}
-                    if output_json_path.exists()
-                    else {}
-                ),
-            },
-        )
-
-        # Tool bundle
         if ctx is not None and tool_started_at and tool_finished_at:
-            artifacts: dict[str, str] = {}
+            artifacts_dict = {}
             if out_dir.exists():
-                artifacts["outputs_dir"] = self._relpath(ctx.run_dir, out_dir) + "/"
+                artifacts_dict["outputs_dir"] = self._relpath(ctx.run_dir, out_dir) + "/"
             if output_json_path.exists():
-                artifacts["output_json"] = self._relpath(ctx.run_dir, output_json_path)
-            per_rule_log = out_dir / "per_rule_log.jsonl"
-            if per_rule_log.exists():
-                artifacts["per_rule_log"] = self._relpath(ctx.run_dir, per_rule_log)
-
+                artifacts_dict["output_json"] = self._relpath(ctx.run_dir, output_json_path)
             primary_index = write_tool_bundle(
                 ctx,
                 "quark",
-                ["quark", "per-rule-mode", f"{len(rule_files)}-rules"],
+                ["quark", "monolith", f"{len(rule_files)}-rules"],
                 tool_started_at,
                 tool_finished_at,
-                0 if report.status == "ok" else 1,
-                "",
-                "",
-                artifacts,
+                monolith_exit,
+                monolith_stdout,
+                monolith_stderr,
+                artifacts_dict,
             )
             if primary_index:
                 tools_index = ctx.meta.setdefault("tools_index", [])

@@ -89,7 +89,7 @@ class Stage3QuarkRunner:
         log: Callable[[str], None],
         ctx: RunContext | None = None,
     ) -> QuarkReport:
-        emit_progress(self.on_progress, "Running Quark rules (per-rule mode)...")
+        emit_progress(self.on_progress, "Running Quark rules directory...")
         rules_dir = Path(self.config.quark_rules_dir) if self.config.quark_rules_dir else None
         quark_config = QuarkConfig(
             rules_dir=rules_dir,
