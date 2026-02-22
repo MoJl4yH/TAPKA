@@ -1518,12 +1518,12 @@ class MainWindow(QMainWindow):
         if not self.quark_log_view:
             return
 
-        # Синтетический "N%" — обновить progress bar, не засорять лог
+        # Synthetic "N%" marker: update progress bar without polluting the log.
         if re.fullmatch(r"\d{1,3}%", message.strip()):
             try:
                 pct = max(0, min(100, int(message.strip().replace("%", ""))))
                 if self.quark_progress_bar:
-                    # Не переключать шкалу если уже в rule-mode (max > 100)
+                    # Do not switch scale if already in rule mode (max > 100).
                     if self.quark_progress_bar.maximum() <= 100:
                         self.quark_progress_bar.setMaximum(100)
                         self.quark_progress_bar.setValue(pct)
@@ -1531,7 +1531,7 @@ class MainWindow(QMainWindow):
                 pass
             return
 
-        # Записать в лог-окно
+        # Append to log view.
         self.quark_log_view.appendPlainText(message)
         self.quark_log_view.verticalScrollBar().setValue(
             self.quark_log_view.verticalScrollBar().maximum()
@@ -1550,7 +1550,7 @@ class MainWindow(QMainWindow):
                 self.quark_progress_label.setText(f"Rule {current}/{total}: {rule_name}")
             return
 
-        # --- Legacy: tqdm "N%" из stderr (backward compat) ---
+        # --- Legacy: tqdm "N%" from stderr (backward compatibility) ---
         pct_match = re.search(r"(\d{1,3})%", message)
         if pct_match:
             try:
@@ -1564,7 +1564,7 @@ class MainWindow(QMainWindow):
                 pass
             return
 
-        # Обычное сообщение — показать в label, но не затирать rule progress
+        # Regular message: show in label without overriding rule progress.
         if self.quark_progress_label:
             current_text = self.quark_progress_label.text()
             if not current_text.startswith("Rule "):
@@ -2508,10 +2508,8 @@ class MainWindow(QMainWindow):
             self.quark_status_label.setText("Missing")
             self.quark_rules_label.setText(str(rules_dir))
             return
-        rule_count = 0
-        for path in rules_dir.rglob("*"):
-            if path.is_file() and path.suffix.lower() in (".json", ".yml", ".yaml"):
-                rule_count += 1
+        rules_path = rules_dir / "rules" if (rules_dir / "rules").is_dir() else rules_dir
+        rule_count = sum(1 for _ in rules_path.glob("*.json"))
         status = "Ready" if rule_count else "Empty"
         self.quark_status_label.setText(status)
         self.quark_rules_label.setText(f"{rule_count} rules")

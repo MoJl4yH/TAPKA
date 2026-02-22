@@ -8,7 +8,7 @@ from analysis.storage import Storage
 from analysis.settings import load_settings, save_settings, DEFAULT_WORKSPACE
 
 def main():
-    # Инициализация приложения
+    # Application initialization.
     app = QApplication(sys.argv)
 
     settings = load_settings()
@@ -43,16 +43,16 @@ def main():
         save_settings(settings)
         workspace = str(workspace_path)
 
-    # Создаем экземпляр Storage для работы с проектами
+    # Create a Storage instance for project operations.
     storage = Storage(workspace=workspace)
 
-    # Создаем главное окно и передаем storage для работы с проектами
+    # Create the main window and pass storage.
     window = MainWindow(storage)
 
-    # Показываем окно
+    # Show the window.
     window.show()
 
-    # Запускаем цикл событий
+    # Start the event loop.
     sys.exit(app.exec())
 
 if __name__ == "__main__":

@@ -78,7 +78,7 @@ def normalize_stage3(ctx: RunContext, mobsf_result: Any | None, quark_result: An
                     tool_counts,
                     "mobsf",
                     "url",
-                    "Обнаружен URL",
+                    "Detected URL",
                     url,
                     evidence,
                 )
@@ -88,7 +88,7 @@ def normalize_stage3(ctx: RunContext, mobsf_result: Any | None, quark_result: An
                     tool_counts,
                     "mobsf",
                     "host",
-                    "Обнаружен домен",
+                    "Detected domain",
                     domain,
                     evidence,
                 )
@@ -98,7 +98,7 @@ def normalize_stage3(ctx: RunContext, mobsf_result: Any | None, quark_result: An
                     tool_counts,
                     "mobsf",
                     "permission",
-                    "Обнаружено разрешение",
+                    "Detected permission",
                     permission,
                     evidence,
                 )
@@ -108,7 +108,7 @@ def normalize_stage3(ctx: RunContext, mobsf_result: Any | None, quark_result: An
                     tool_counts,
                     "mobsf",
                     "component",
-                    "Обнаружен экспортируемый компонент",
+                    "Detected exported component",
                     component,
                     evidence,
                 )
@@ -133,7 +133,7 @@ def normalize_stage3(ctx: RunContext, mobsf_result: Any | None, quark_result: An
                     tool_counts,
                     "quark",
                     "quark_finding",
-                    "Срабатывание правила Quark",
+                    "Quark rule match",
                     value,
                     evidence,
                 )
@@ -226,7 +226,7 @@ def normalize_stage3(ctx: RunContext, mobsf_result: Any | None, quark_result: An
                 tool_counts,
                 tool_name,
                 "tool_execution",
-                "Запуск инструмента",
+                "Tool execution",
                 value,
                 evidence,
             )

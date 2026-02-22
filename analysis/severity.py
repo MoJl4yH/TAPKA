@@ -117,7 +117,7 @@ class SeverityEngine:
     }
     max_tag_boost = 2.0
 
-    # Категории с гарантированным минимальным severity (не зависит от confidence)
+    # Categories with guaranteed minimum severity (independent of confidence).
     severity_floor: dict[str, str] = {
         "vul_debuggable_true": "high",
         "supplychain_signature_invalid": "high",
@@ -146,7 +146,7 @@ class SeverityEngine:
             finding.score = round(score, 2)
             computed_severity = cls._severity_for_score(score)
 
-            # Применить severity floor
+            # Apply severity floor.
             floor = cls.severity_floor.get(finding.category)
             if floor and cls._severity_rank(computed_severity) < cls._severity_rank(floor):
                 finding.severity = floor

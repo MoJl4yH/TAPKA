@@ -25,9 +25,9 @@ QUARK_COMMAND = "quark"
 @dataclass
 class QuarkConfig:
     rules_dir: Path | None = None
-    timeout_sec: int = 600              # таймаут монолита
-    per_rule_timeout_sec: int = 60      # таймаут на одно правило в per-rule fallback
-    max_rules: int | None = None        # для отладки — обработать первые N правил
+    timeout_sec: int = 600              # monolith timeout
+    per_rule_timeout_sec: int = 60      # per-rule timeout in fallback mode
+    max_rules: int | None = None        # debug mode: process first N rules
 
 
 class QuarkRunner:
@@ -109,7 +109,7 @@ class QuarkRunner:
             monolith_stderr = f"Timeout after {self.config.timeout_sec}s"
             self._emit(f"Quark monolith timed out after {self.config.timeout_sec}s.")
 
-        # Сохранить stdout/stderr монолита в tool files
+        # Save monolith stdout/stderr to tool files.
         if ctx is not None:
             tool_root = ctx.run_dir / "tools" / "quark"
             tool_root.mkdir(parents=True, exist_ok=True)
@@ -132,7 +132,7 @@ class QuarkRunner:
                 f"Quark monolith killed (exit {monolith_exit}). "
                 f"Switching to per-rule mode..."
             )
-            # Пометить в stderr.txt начало fallback-секции
+            # Mark the start of fallback section in stderr.txt.
             if ctx is not None:
                 tool_root = ctx.run_dir / "tools" / "quark"
                 with (tool_root / "stderr.txt").open("a", encoding="utf-8") as fh:
@@ -232,7 +232,7 @@ class QuarkRunner:
 
             return report
 
-        # ── 4. Monolith: обработка результата (успех или обычная ошибка) ──
+        # -- 4. Monolith: process result (success or regular error) --
         tool_finished_at = now_utc_iso() if ctx is not None else None
 
         if monolith_exit == 0 and output_json_path.exists():
@@ -310,14 +310,14 @@ class QuarkRunner:
         out_dir: Path,
     ) -> tuple[list[dict], dict, dict]:
         """
-        Запустить каждое правило в отдельном subprocess.
-        Каждый процесс: quark -r <rule.json> -a <apk> --output <tmp.json>
-        После exit процесса ОС освобождает всю его память.
+        Run each rule in a separate subprocess.
+        Each process: quark -r <rule.json> -a <apk> --output <tmp.json>
+        OS memory is reclaimed after each process exits.
 
         Returns:
-            crimes:   list[dict] — собранные crime-записи
-            apk_meta: dict       — md5, apk_filename, size_bytes (из первого успешного)
-            stats:    dict       — total, matched, failed, skipped, timed_out, oom
+            crimes:   list[dict] - collected crime entries
+            apk_meta: dict       - md5, apk_filename, size_bytes (from first successful run)
+            stats:    dict       - total, matched, failed, skipped, timed_out, oom
         """
         crimes: list[dict] = []
         apk_meta: dict = {}
@@ -379,7 +379,7 @@ class QuarkRunner:
                 entry["duration_sec"] = round(time.monotonic() - start, 2)
                 entry["exit_code"] = exit_code
 
-                # OOM detection (exit 137 = SIGKILL, или "Killed" в stderr)
+                # OOM detection (exit 137 = SIGKILL, or "Killed" in stderr)
                 is_oom = exit_code in (137, 9) or "Killed" in (stderr or "")
                 entry["oom_detected"] = is_oom
 
@@ -419,7 +419,7 @@ class QuarkRunner:
                     consecutive_failures += 1
 
                 else:
-                    # exit 0, но нет output файла
+                    # exit 0, but no output file
                     entry["status"] = "no_output"
                     stats["skipped"] += 1
                     consecutive_failures += 1
@@ -441,14 +441,14 @@ class QuarkRunner:
             finally:
                 log_handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
                 log_handle.flush()
-                # Удалить tmp output сразу — экономия диска
+                # Delete tmp output immediately to save disk space.
                 if rule_output.exists():
                     try:
                         rule_output.unlink()
                     except OSError:
                         pass
 
-            # Early exit при каскадных ошибках
+            # Early exit on cascading failures.
             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                 remaining = len(rule_files) - idx - 1
                 self._emit(
@@ -461,7 +461,7 @@ class QuarkRunner:
         log_handle.close()
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
-        # Подсчитать matched
+        # Count matched entries.
         for c in crimes:
             if self._is_matched(c):
                 stats["matched"] += 1
@@ -476,7 +476,7 @@ class QuarkRunner:
 
     @staticmethod
     def _is_matched(crime: dict) -> bool:
-        """Правило считается сработавшим если confidence >= 60% или score > 0."""
+        """A rule is considered matched if confidence >= 60% or score > 0."""
         conf_str = crime.get("confidence", "0%")
         try:
             conf_val = int(conf_str.replace("%", ""))
@@ -486,7 +486,7 @@ class QuarkRunner:
 
     @staticmethod
     def _compute_threat_level(total_score: float) -> str:
-        """Воспроизвести логику Quark для threat_level."""
+        """Reproduce Quark threat_level logic."""
         if total_score >= 80:
             return "High Risk"
         if total_score >= 40:

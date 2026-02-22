@@ -1,5 +1,5 @@
 [MASTER]
-# pylint должен запускаться из корня проекта и видеть этот файл.
+# Run pylint from the project root so this config file is detected.
 ignore=venv,.venv,build,dist,__pycache__,.git,.mypy_cache,.pytest_cache,.ruff_cache,.tapka
 ignore-patterns=.*\.pyi$,.*_generated\.py$,.*generated.*\.py$,.*\.pb2\.py$,.*_ui\.py$
 
@@ -13,19 +13,19 @@ score=yes
 
 [MESSAGES CONTROL]
 disable=
-    # стиль/формат/нейминг — не про рефакторинг логики
+    # style/format/naming rules are not blockers for logic refactoring
     C0103,  # invalid-name
     C0114,  # missing-module-docstring
     C0115,  # missing-class-docstring
     C0116,  # missing-function-docstring
     C0301,  # line-too-long
-    C0302,  # too-many-lines (вынесем в refactor позже, не как блокер всего проекта)
+    C0302,  # too-many-lines (can be refactored later; not a repo-wide blocker)
     C0325,  # superfluous-parens
     C0411,  # wrong-import-order
     C0412,  # ungrouped-imports
     C0413,  # wrong-import-position
-    R0903,  # too-few-public-methods (для dataclass/контейнеров ок)
-    R0801,  # duplicate-code (часто шумит на похожих раннерах; включишь позже при желании)
+    R0903,  # too-few-public-methods (acceptable for dataclass/container types)
+    R0801,  # duplicate-code (often noisy for similar runners; enable later if needed)
 
 [FORMAT]
 max-line-length=120

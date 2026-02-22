@@ -25,9 +25,9 @@ from models import Run
 @dataclass
 class Stage3QuarkConfig:
     quark_timeout_sec: int = 1800               # legacy (backward compat)
-    quark_per_rule_timeout_sec: int = 60        # таймаут на одно правило
+    quark_per_rule_timeout_sec: int = 60        # timeout per rule
     quark_rules_dir: str | None = None
-    quark_max_rules: int | None = None          # для отладки — первые N правил
+    quark_max_rules: int | None = None          # debug mode: first N rules
 
 
 class Stage3QuarkRunner:

@@ -29,33 +29,33 @@ DYNAMIC_LOAD_CATEGORIES = {
 SEVERITY_RANK = {"high": 3, "medium": 2, "low": 1, "info": 0}
 
 SECTION_DESCRIPTIONS = {
-    "identification": "Идентификационные сведения об анализируемом APK для обеспечения воспроизводимости результатов.",
-    "signing": "Анализ цифровой подписи APK: применяемые схемы, идентификация подписанта, криптографические характеристики.",
-    "manifest": "Метаданные и декларации приложения: разрешения, экспортируемые компоненты, конфигурационные флаги.",
-    "string_screening": "Поверхностный строковый и сигнатурный скрининг декодированного содержимого APK.",
-    "endpoints": "Обнаруженные обращения к внешним ресурсам (URL, IPv4) в коде и ресурсах приложения.",
-    "secrets": "Потенциально захардкоженные чувствительные данные: ключи, токены, пароли, JWT.",
-    "dynamic_load": "Индикаторы динамической загрузки кода и выполнения команд ОС.",
-    "anti_analysis": "Индикаторы защиты от анализа: проверки эмулятора, root, Frida, отладчика.",
-    "ndv_capabilities": "Потенциально опасные возможности: удалённое управление, перехват, слежка.",
-    "yara_screening": "Результаты сигнатурного скрининга по правилам YARA.",
-    "vulnerabilities": "Уязвимости конфигурации и небезопасные паттерны реализации.",
-    "native_strings": "Строки, извлечённые из нативных библиотек (.so) и проверенные на индикаторы.",
-    "network_activity": "Фактические сетевые соединения приложения, зафиксированные при динамическом анализе.",
-    "install_changes": "Изменения файловой системы и состояния системы после установки APK.",
-    "runtime_behavior": "Поведение приложения при выполнении: сервисы, receivers, ошибки.",
-    "mobsf": "Результаты комплексного анализа MobSF: security score, уязвимости, конфигурации.",
-    "quark": "Результаты поведенческого анализа Quark Engine: сработавшие правила.",
-    "apkid": "Идентификация упаковщиков, обфускаторов и защитных механизмов (APKiD).",
-    "apkleaks": "Потенциальные утечки чувствительных данных и конфигураций (APKLeaks).",
-    "overall_verdict": "Итоговая оценка по двухуровневой шкале методики.",
+    "identification": "Identification metadata for reproducible APK analysis.",
+    "signing": "APK signature and certificate details: schemes, signer identity, and cryptographic properties.",
+    "manifest": "App manifest metadata: permissions, exported components, and security flags.",
+    "string_screening": "Static string and signature screening of decoded APK content.",
+    "endpoints": "External endpoints (URL, IPv4) found in code and resources.",
+    "secrets": "Potential hardcoded sensitive data: keys, tokens, passwords, and JWT.",
+    "dynamic_load": "Indicators of dynamic code loading and OS command execution.",
+    "anti_analysis": "Anti-analysis indicators: emulator, root, Frida, and debugger checks.",
+    "ndv_capabilities": "Potential undeclared capabilities: remote control, interception, and surveillance.",
+    "yara_screening": "YARA signature screening results.",
+    "vulnerabilities": "Configuration weaknesses and unsafe implementation patterns.",
+    "native_strings": "Indicators found in extracted native library (.so) strings.",
+    "network_activity": "Observed network activity during dynamic analysis.",
+    "install_changes": "File system and system state changes after APK installation.",
+    "runtime_behavior": "Runtime behavior: services, receivers, and errors.",
+    "mobsf": "MobSF results: security score, findings, and configuration signals.",
+    "quark": "Quark behavioral analysis results and matched rules.",
+    "apkid": "Detected packers, obfuscators, and protection mechanisms (APKiD).",
+    "apkleaks": "Potential leaked secrets and configuration values (APKLeaks).",
+    "overall_verdict": "Final assessment using the project two-level decision model.",
 }
 
 REPORT_TITLES = {
-    STAGE_STATIC: "Отчёт статического экспертно-инструментального анализа (Этап 1)",
-    STAGE_DYNAMIC: "Отчёт динамического экспертно-инструментального анализа (Этап 2)",
-    STAGE_CROSS_TOOL: "Отчёт кросс-инструментального анализа (Этап 3)",
-    STAGE_OVERALL: "Итоговое экспертное заключение по результатам анализа Android-приложения",
+    STAGE_STATIC: "Static Expert-Assisted Analysis Report (Stage 1)",
+    STAGE_DYNAMIC: "Dynamic Expert-Assisted Analysis Report (Stage 2)",
+    STAGE_CROSS_TOOL: "Cross-Tool Analysis Report (Stage 3)",
+    STAGE_OVERALL: "Final Expert Assessment for Android Application Analysis",
 }
 
 
@@ -192,7 +192,7 @@ def _rows_table(
     if hidden:
         table += (
             f"<button class='btn-link' onclick=\"tapkaToggle('{html.escape(table_id)}-extra', this)\">"
-            f"Показать все ({len(rows)})</button>"
+            f"Show all ({len(rows)})</button>"
         )
     return table
 
@@ -216,7 +216,7 @@ def _artifacts_table(report: ReportV2, limit: int = TOP_ARTIFACTS) -> str:
     return _rows_table(
         ["Type", "Name", "Path", "Size", "MIME", "Action"],
         rows,
-        "Артефакты отсутствуют.",
+        "No artifacts.",
         "artifacts",
         limit=limit,
     )
@@ -237,7 +237,7 @@ def _tools_table(report: ReportV2, limit: int = 12) -> str:
                 metrics,
             ]
         )
-    return _rows_table(["Tool", "Status", "Duration ms", "Metrics"], rows, "Инструменты не зафиксированы.", "tools", limit)
+    return _rows_table(["Tool", "Status", "Duration ms", "Metrics"], rows, "No tools recorded.", "tools", limit)
 
 
 def _identification_table(report: ReportV2) -> str:
@@ -264,7 +264,7 @@ def _severity_summary(report: ReportV2) -> str:
         [f"<span class='{_severity_class(severity)}'>{severity}</span>", html.escape(str(counter.get(severity, 0)))]
         for severity in ("high", "medium", "low", "info")
     ]
-    return _rows_table(["Severity", "Count"], rows, "Нет findings.", "severity-summary")
+    return _rows_table(["Severity", "Count"], rows, "No findings.", "severity-summary")
 
 
 def _category_top_table(findings: list[FindingV2], limit: int = 15) -> str:
@@ -299,7 +299,7 @@ def _category_top_table(findings: list[FindingV2], limit: int = 15) -> str:
                 "<br/>".join(html.escape(value) for value in payload["examples"]) or "-",
             ]
         )
-    return _rows_table(["Category", "Max severity", "Count", "Examples"], rows, "Нет данных по категориям.", "category-top", limit)
+    return _rows_table(["Category", "Max severity", "Count", "Examples"], rows, "No category data.", "category-top", limit)
 
 
 def _findings_table(findings: list[FindingV2], table_id: str, limit: int = TOP_FINDINGS) -> str:
@@ -314,12 +314,12 @@ def _findings_table(findings: list[FindingV2], table_id: str, limit: int = TOP_F
                 html.escape(_finding_evidence_snippet(finding)[:160]) or "-",
             ]
         )
-    return _rows_table(["Severity", "Category", "Title", "Location", "Evidence"], rows, "Нет findings.", table_id, limit)
+    return _rows_table(["Severity", "Category", "Title", "Location", "Evidence"], rows, "No findings.", table_id, limit)
 
 
 def _notes_block(report: ReportV2) -> str:
     if not report.notes:
-        return "<p class='muted'>Примечания отсутствуют.</p>"
+        return "<p class='muted'>No notes.</p>"
     rows = "".join(f"<li>{html.escape(note)}</li>" for note in report.notes)
     return f"<ul>{rows}</ul>"
 
@@ -331,7 +331,7 @@ def _render_stage1(report: ReportV2) -> list[tuple[str, str, str]]:
     sections.append(
         _card(
             "s1-identification",
-            "1.1 Идентификация объекта анализа",
+            "1.1 Analysis Target Identification",
             _identification_table(report),
             SECTION_DESCRIPTIONS["identification"],
         )
@@ -340,9 +340,9 @@ def _render_stage1(report: ReportV2) -> list[tuple[str, str, str]]:
     sections.append(
         _card(
             "s1-tools",
-            "1.2 Статус инструментов",
+            "1.2 Tool Status",
             _tools_table(report),
-            "Состояние запусков инструментов и их ключевые метрики по этапу статического анализа.",
+            "Tool execution status and key metrics for static analysis.",
         )
     )
 
@@ -355,10 +355,10 @@ def _render_stage1(report: ReportV2) -> list[tuple[str, str, str]]:
     cert_rows = [[html.escape(name), html.escape(_fmt(value))] for name, value in sorted(cert.items())]
     signing_findings = _filter_findings(report.findings, SIGNING_CATEGORIES)
     signing_html = ""
-    signing_html += "<h3>Схемы подписи</h3>" + _rows_table(["Scheme", "Enabled"], scheme_rows, "Нет данных.", "sign-schemes")
-    signing_html += "<h3>Сертификат</h3>" + _rows_table(["Field", "Value"], cert_rows, "Нет данных.", "sign-cert")
-    signing_html += "<h3>Проблемы подписи</h3>" + _findings_table(signing_findings, "sign-findings", limit=10)
-    sections.append(_card("s1-signing", "1.3 Анализ подписи APK", signing_html, SECTION_DESCRIPTIONS["signing"]))
+    signing_html += "<h3>Signature Schemes</h3>" + _rows_table(["Scheme", "Enabled"], scheme_rows, "No data.", "sign-schemes")
+    signing_html += "<h3>Certificate</h3>" + _rows_table(["Field", "Value"], cert_rows, "No data.", "sign-cert")
+    signing_html += "<h3>Signature Issues</h3>" + _findings_table(signing_findings, "sign-findings", limit=10)
+    sections.append(_card("s1-signing", "1.3 APK Signature Analysis", signing_html, SECTION_DESCRIPTIONS["signing"]))
 
     manifest_section = section_by_id.get("manifest")
     manifest = manifest_section.data if manifest_section else {}
@@ -374,17 +374,17 @@ def _render_stage1(report: ReportV2) -> list[tuple[str, str, str]]:
             ["exported_total", html.escape(str(len(exported)))],
             ["flags_total", html.escape(str(len(flags)))],
         ],
-        "Нет данных.",
+        "No data.",
         "manifest-summary",
     )
-    manifest_html += "<h3>Флаги</h3>" + _rows_table(["Flag"], [[html.escape(item)] for item in flags], "Нет флагов.", "manifest-flags", 15)
-    manifest_html += "<h3>Разрешения</h3>" + _rows_table(
-        ["Permission"], [[f"<span class='mono'>{html.escape(item)}</span>"] for item in permissions], "Нет разрешений.", "manifest-perm", 20
+    manifest_html += "<h3>Flags</h3>" + _rows_table(["Flag"], [[html.escape(item)] for item in flags], "No flags.", "manifest-flags", 15)
+    manifest_html += "<h3>Permissions</h3>" + _rows_table(
+        ["Permission"], [[f"<span class='mono'>{html.escape(item)}</span>"] for item in permissions], "No permissions.", "manifest-perm", 20
     )
-    manifest_html += "<h3>Экспортируемые компоненты</h3>" + _rows_table(
-        ["Component"], [[f"<span class='mono'>{html.escape(item)}</span>"] for item in exported], "Нет экспортируемых компонентов.", "manifest-exp", 15
+    manifest_html += "<h3>Exported Components</h3>" + _rows_table(
+        ["Component"], [[f"<span class='mono'>{html.escape(item)}</span>"] for item in exported], "No exported components.", "manifest-exp", 15
     )
-    sections.append(_card("s1-manifest", "1.4 Манифест и конфигурация", manifest_html, SECTION_DESCRIPTIONS["manifest"]))
+    sections.append(_card("s1-manifest", "1.4 Manifest and Configuration", manifest_html, SECTION_DESCRIPTIONS["manifest"]))
 
     urls = [ind for ind in report.indicators if ind.type == "url" and not ind.noise]
     ips = [ind for ind in report.indicators if ind.type == "ip"]
@@ -411,16 +411,16 @@ def _render_stage1(report: ReportV2) -> list[tuple[str, str, str]]:
     ]
 
     string_screening_html = ""
-    string_screening_html += "<h3>1.5.1 Обнаруженные endpoints</h3>"
-    string_screening_html += _rows_table(["URL", "Examples", "First source"], endpoint_url_rows, "URL не обнаружены.", "endpoints-url", TOP_ENDPOINT_URLS)
-    string_screening_html += _rows_table(["IPv4", "Examples", "First source"], endpoint_ip_rows, "IPv4 не обнаружены.", "endpoints-ip", TOP_ENDPOINT_IPS)
-    string_screening_html += "<h3>1.5.2 Потенциальные секреты</h3>" + _findings_table(secrets, "secret-findings", 10)
-    string_screening_html += "<h3>1.5.3 Динамическая загрузка</h3>" + _findings_table(dynamic_load, "dynamic-load-findings", 10)
-    string_screening_html += "<h3>1.5.4 Антианализ</h3>" + _findings_table(anti_analysis, "anti-analysis-findings", 10)
-    string_screening_html += "<h3>1.5.5 Признаки НДВ</h3>" + _findings_table(ndv_capabilities, "ndv-findings", 12)
+    string_screening_html += "<h3>1.5.1 Detected Endpoints</h3>"
+    string_screening_html += _rows_table(["URL", "Examples", "First source"], endpoint_url_rows, "No URLs found.", "endpoints-url", TOP_ENDPOINT_URLS)
+    string_screening_html += _rows_table(["IPv4", "Examples", "First source"], endpoint_ip_rows, "No IPv4 addresses found.", "endpoints-ip", TOP_ENDPOINT_IPS)
+    string_screening_html += "<h3>1.5.2 Potential Secrets</h3>" + _findings_table(secrets, "secret-findings", 10)
+    string_screening_html += "<h3>1.5.3 Dynamic Loading</h3>" + _findings_table(dynamic_load, "dynamic-load-findings", 10)
+    string_screening_html += "<h3>1.5.4 Anti-Analysis</h3>" + _findings_table(anti_analysis, "anti-analysis-findings", 10)
+    string_screening_html += "<h3>1.5.5 Undeclared Capability Signals</h3>" + _findings_table(ndv_capabilities, "ndv-findings", 12)
     string_screening_html += "<h3>1.5.6 YARA</h3>" + _findings_table(yara_findings, "yara-findings", 10)
-    string_screening_html += "<h3>1.5.7 Уязвимости конфигурации</h3>" + _findings_table(vulnerabilities, "vuln-findings", 15)
-    sections.append(_card("s1-string-screening", "1.5 Строковый и сигнатурный скрининг", string_screening_html, SECTION_DESCRIPTIONS["string_screening"]))
+    string_screening_html += "<h3>1.5.7 Configuration Vulnerabilities</h3>" + _findings_table(vulnerabilities, "vuln-findings", 15)
+    sections.append(_card("s1-string-screening", "1.5 String and Signature Screening", string_screening_html, SECTION_DESCRIPTIONS["string_screening"]))
 
     native_section = section_by_id.get("native_strings")
     native_payload = native_section.data if native_section else {}
@@ -432,17 +432,17 @@ def _render_stage1(report: ReportV2) -> list[tuple[str, str, str]]:
             [".so files", html.escape(_fmt(native_payload.get("so_files")))],
             ["Hits", html.escape(_fmt(native_payload.get("hits_total")))],
         ],
-        "Нет данных.",
+        "No data.",
         "native-summary",
     )
-    native_html += _rows_table(["Top hits"], [[html.escape(hit)] for hit in native_hits], "Совпадений не найдено.", "native-hits", 10)
-    sections.append(_card("s1-native-strings", "1.6 Строки из .so библиотек", native_html, SECTION_DESCRIPTIONS["native_strings"]))
+    native_html += _rows_table(["Top hits"], [[html.escape(hit)] for hit in native_hits], "No matches found.", "native-hits", 10)
+    sections.append(_card("s1-native-strings", "1.6 Native .so String Signals", native_html, SECTION_DESCRIPTIONS["native_strings"]))
 
     findings_summary_html = _severity_summary(report) + _category_top_table(report.findings)
-    sections.append(_card("s1-findings-summary", "1.7 Сводка findings", findings_summary_html, "Распределение findings по severity и категориям."))
+    sections.append(_card("s1-findings-summary", "1.7 Findings Summary", findings_summary_html, "Findings distribution by severity and category."))
 
-    sections.append(_card("s1-artifacts", "1.8 Артефакты", _artifacts_table(report), "Компактный перечень файлов и директорий, сформированных при анализе."))
-    sections.append(_card("s1-notes", "1.9 Примечания и ошибки", _notes_block(report), "Служебные сообщения и ошибки этапа."))
+    sections.append(_card("s1-artifacts", "1.8 Artifacts", _artifacts_table(report), "Compact list of files and directories generated during analysis."))
+    sections.append(_card("s1-notes", "1.9 Notes and Errors", _notes_block(report), "Stage runtime notes and errors."))
     return sections
 
 
@@ -453,7 +453,7 @@ def _render_stage3(report: ReportV2) -> list[tuple[str, str, str]]:
     sections.append(
         _card(
             "s3-identification",
-            "3.1 Идентификация объекта анализа",
+            "3.1 Analysis Target Identification",
             _identification_table(report),
             SECTION_DESCRIPTIONS["identification"],
         )
@@ -462,9 +462,9 @@ def _render_stage3(report: ReportV2) -> list[tuple[str, str, str]]:
     sections.append(
         _card(
             "s3-tools",
-            "3.2 Статус инструментов",
+            "3.2 Tool Status",
             _tools_table(report, limit=8),
-            "Сводка запусков MobSF, Quark, APKiD и APKLeaks.",
+            "Execution summary for MobSF, Quark, APKiD, and APKLeaks.",
         )
     )
 
@@ -477,7 +477,7 @@ def _render_stage3(report: ReportV2) -> list[tuple[str, str, str]]:
             score_class = "score-good"
         elif score < 40:
             score_class = "score-bad"
-    score_html = f"<div class='score-badge {score_class}'>{html.escape(_fmt(score))}/100</div>" if score is not None else "<p class='muted'>Security score не найден.</p>"
+    score_html = f"<div class='score-badge {score_class}'>{html.escape(_fmt(score))}/100</div>" if score is not None else "<p class='muted'>Security score not found.</p>"
     mobsf_high = mobsf_data.get("appsec_high") if isinstance(mobsf_data.get("appsec_high"), list) else []
     mobsf_warning = mobsf_data.get("appsec_warning") if isinstance(mobsf_data.get("appsec_warning"), list) else []
     high_rows = []
@@ -499,11 +499,11 @@ def _render_stage3(report: ReportV2) -> list[tuple[str, str, str]]:
     mobsf_urls = mobsf_data.get("urls_top") if isinstance(mobsf_data.get("urls_top"), list) else []
     mobsf_domains = mobsf_data.get("domains_top") if isinstance(mobsf_data.get("domains_top"), list) else []
     mobsf_html = score_html
-    mobsf_html += "<h3>High findings</h3>" + _rows_table(["Title", "Section", "Description"], high_rows, "Нет high findings.", "mobsf-high", 15)
-    mobsf_html += "<h3>Warning findings</h3>" + _rows_table(["Title", "Section"], warning_rows, "Нет warning findings.", "mobsf-warning", 10)
-    mobsf_html += "<h3>Top URL</h3>" + _rows_table(["URL"], [[html.escape(str(value))] for value in mobsf_urls], "URL отсутствуют.", "mobsf-urls", 10)
-    mobsf_html += "<h3>Top domains</h3>" + _rows_table(["Domain"], [[html.escape(str(value))] for value in mobsf_domains], "Домены отсутствуют.", "mobsf-domains", 10)
-    sections.append(_card("s3-mobsf", "3.3 Результаты MobSF", mobsf_html, SECTION_DESCRIPTIONS["mobsf"]))
+    mobsf_html += "<h3>High findings</h3>" + _rows_table(["Title", "Section", "Description"], high_rows, "No high findings.", "mobsf-high", 15)
+    mobsf_html += "<h3>Warning findings</h3>" + _rows_table(["Title", "Section"], warning_rows, "No warning findings.", "mobsf-warning", 10)
+    mobsf_html += "<h3>Top URL</h3>" + _rows_table(["URL"], [[html.escape(str(value))] for value in mobsf_urls], "No URLs found.", "mobsf-urls", 10)
+    mobsf_html += "<h3>Top domains</h3>" + _rows_table(["Domain"], [[html.escape(str(value))] for value in mobsf_domains], "No domains found.", "mobsf-domains", 10)
+    sections.append(_card("s3-mobsf", "3.3 MobSF Results", mobsf_html, SECTION_DESCRIPTIONS["mobsf"]))
 
     quark_details = section_by_id.get("quark_details")
     quark_data = quark_details.data if quark_details and isinstance(quark_details.data, dict) else {}
@@ -526,9 +526,9 @@ def _render_stage3(report: ReportV2) -> list[tuple[str, str, str]]:
                 html.escape(", ".join(str(label) for label in item.get("label", []) if isinstance(label, str))),
             ]
         )
-    quark_html = _rows_table(["Field", "Value"], quark_summary_rows, "Нет данных.", "quark-summary")
-    quark_html += _rows_table(["Rule", "Crime", "Score", "Labels"], crime_rows, "Срабатываний нет.", "quark-crimes", 15)
-    sections.append(_card("s3-quark", "3.4 Результаты Quark Engine", quark_html, SECTION_DESCRIPTIONS["quark"]))
+    quark_html = _rows_table(["Field", "Value"], quark_summary_rows, "No data.", "quark-summary")
+    quark_html += _rows_table(["Rule", "Crime", "Score", "Labels"], crime_rows, "No matches.", "quark-crimes", 15)
+    sections.append(_card("s3-quark", "3.4 Quark Engine Results", quark_html, SECTION_DESCRIPTIONS["quark"]))
 
     apkid_details = section_by_id.get("apkid_details")
     apkid_data = apkid_details.data if apkid_details and isinstance(apkid_details.data, dict) else {}
@@ -546,11 +546,11 @@ def _render_stage3(report: ReportV2) -> list[tuple[str, str, str]]:
     apkid_html = _rows_table(
         ["Filename", "Category", "Value"],
         apkid_rows,
-        "Защитные механизмы не выявлены.",
+        "No protection mechanisms detected.",
         "apkid-matches",
         30,
     )
-    sections.append(_card("s3-apkid", "3.5 Результаты APKiD", apkid_html, SECTION_DESCRIPTIONS["apkid"]))
+    sections.append(_card("s3-apkid", "3.5 APKiD Results", apkid_html, SECTION_DESCRIPTIONS["apkid"]))
 
     apkleaks_details = section_by_id.get("apkleaks_details")
     apkleaks_data = apkleaks_details.data if apkleaks_details and isinstance(apkleaks_details.data, dict) else {}
@@ -565,18 +565,18 @@ def _render_stage3(report: ReportV2) -> list[tuple[str, str, str]]:
                 html.escape(_fmt(item.get("file_path") or "-")),
             ]
         )
-    apkleaks_html = _rows_table(["Type", "Value", "File"], leak_rows, "Утечки не обнаружены.", "apkleaks-entries", 20)
-    sections.append(_card("s3-apkleaks", "3.6 Результаты APKLeaks", apkleaks_html, SECTION_DESCRIPTIONS["apkleaks"]))
+    apkleaks_html = _rows_table(["Type", "Value", "File"], leak_rows, "No leaks detected.", "apkleaks-entries", 20)
+    sections.append(_card("s3-apkleaks", "3.6 APKLeaks Results", apkleaks_html, SECTION_DESCRIPTIONS["apkleaks"]))
 
     indicator_counter = Counter(ind.type for ind in report.indicators)
     indicator_rows = [[html.escape(kind), html.escape(str(count))] for kind, count in sorted(indicator_counter.items())]
-    indicators_html = _rows_table(["Kind", "Count"], indicator_rows, "Индикаторы отсутствуют.", "s3-indicators")
-    sections.append(_card("s3-indicators", "3.7 Нормализованные индикаторы", indicators_html, "Агрегированные индикаторы Stage3 по типам."))
+    indicators_html = _rows_table(["Kind", "Count"], indicator_rows, "No indicators.", "s3-indicators")
+    sections.append(_card("s3-indicators", "3.7 Normalized Indicators", indicators_html, "Aggregated Stage 3 indicators by type."))
 
     findings_summary_html = _severity_summary(report) + _findings_table(report.findings, "s3-findings", limit=20)
     findings_summary_html += _artifacts_table(report)
     findings_summary_html += _notes_block(report)
-    sections.append(_card("s3-summary", "3.8 Сводка findings, артефакты, примечания", findings_summary_html, "Итоговые результаты кросс-инструментального этапа."))
+    sections.append(_card("s3-summary", "3.8 Findings, Artifacts, and Notes Summary", findings_summary_html, "Final cross-tool stage summary."))
     return sections
 
 
@@ -585,19 +585,19 @@ def _render_stage2(report: ReportV2) -> list[tuple[str, str, str]]:
     sections.append(
         _card(
             "s2-identification",
-            "2.1 Идентификация объекта анализа",
+            "2.1 Analysis Target Identification",
             _identification_table(report),
             SECTION_DESCRIPTIONS["identification"],
         )
     )
-    sections.append(_card("s2-environment", "2.2 Параметры среды", "<p class='muted'>Секция готова к заполнению после реализации Stage2 pipeline.</p>", "Параметры эмулятора, ADB и сетевого окружения."))
-    sections.append(_card("s2-tools", "2.3 Статус инструментов", _tools_table(report), "Состояние инструментов динамического анализа."))
-    sections.append(_card("s2-install", "2.4 Изменения при установке", "<p class='muted'>Данные не собраны.</p>", SECTION_DESCRIPTIONS["install_changes"]))
-    sections.append(_card("s2-runtime", "2.5 Поведение при выполнении", "<p class='muted'>Данные не собраны.</p>", SECTION_DESCRIPTIONS["runtime_behavior"]))
-    sections.append(_card("s2-network", "2.6 Сетевая активность", "<p class='muted'>Данные не собраны.</p>", SECTION_DESCRIPTIONS["network_activity"]))
-    sections.append(_card("s2-correlation", "2.7 Сопоставление со Stage1", "<p class='muted'>Данные не собраны.</p>", "Корреляция статических и динамических индикаторов."))
+    sections.append(_card("s2-environment", "2.2 Runtime Environment", "<p class='muted'>Section will be populated when the Stage 2 pipeline is implemented.</p>", "Emulator, ADB, and network environment parameters."))
+    sections.append(_card("s2-tools", "2.3 Tool Status", _tools_table(report), "Dynamic analysis tool status."))
+    sections.append(_card("s2-install", "2.4 Installation Changes", "<p class='muted'>Data not collected.</p>", SECTION_DESCRIPTIONS["install_changes"]))
+    sections.append(_card("s2-runtime", "2.5 Runtime Behavior", "<p class='muted'>Data not collected.</p>", SECTION_DESCRIPTIONS["runtime_behavior"]))
+    sections.append(_card("s2-network", "2.6 Network Activity", "<p class='muted'>Data not collected.</p>", SECTION_DESCRIPTIONS["network_activity"]))
+    sections.append(_card("s2-correlation", "2.7 Stage 1 Correlation", "<p class='muted'>Data not collected.</p>", "Correlation between static and dynamic indicators."))
     summary_html = _severity_summary(report) + _artifacts_table(report) + _notes_block(report)
-    sections.append(_card("s2-summary", "2.8 Сводка findings, артефакты, примечания", summary_html, "Итоги динамического этапа."))
+    sections.append(_card("s2-summary", "2.8 Findings, Artifacts, and Notes Summary", summary_html, "Dynamic stage summary."))
     return sections
 
 
@@ -606,13 +606,13 @@ def _render_overall(report: ReportV2) -> list[tuple[str, str, str]]:
     sections.append(
         _card(
             "o-identification",
-            "O.1 Идентификация объекта",
+            "O.1 Target Identification",
             _identification_table(report),
             SECTION_DESCRIPTIONS["identification"],
         )
     )
 
-    sections.append(_card("o-tools", "O.2 Используемый инструментарий", _tools_table(report, limit=20), "Инструменты, использованные во всех этапах."))
+    sections.append(_card("o-tools", "O.2 Tools Used", _tools_table(report, limit=20), "Tools used across all stages."))
 
     dedup: dict[str, FindingV2] = {}
     for finding in report.findings:
@@ -622,32 +622,32 @@ def _render_overall(report: ReportV2) -> list[tuple[str, str, str]]:
     unique_findings = list(dedup.values())
 
     overall_html = _severity_summary(report) + _findings_table(unique_findings, "overall-top-findings", 20)
-    sections.append(_card("o-findings", "O.3 Агрегированная сводка findings", overall_html, "Дедуплицированные findings по category+evidence."))
+    sections.append(_card("o-findings", "O.3 Aggregated Findings Summary", overall_html, "Deduplicated findings by category+evidence."))
 
     ndv_findings = _filter_findings(unique_findings, NDV_CATEGORIES)
-    sections.append(_card("o-ndv", "O.4 Выявленные признаки НДВ", _findings_table(ndv_findings, "overall-ndv", 15), "Категории потенциальных недекларированных возможностей."))
+    sections.append(_card("o-ndv", "O.4 Undeclared Capability Signals", _findings_table(ndv_findings, "overall-ndv", 15), "Potential undeclared capability categories."))
 
     vulnerabilities = _filter_findings(unique_findings, VULNERABILITY_CATEGORIES)
-    sections.append(_card("o-vuln", "O.5 Выявленные уязвимости", _findings_table(vulnerabilities, "overall-vuln", 20), SECTION_DESCRIPTIONS["vulnerabilities"]))
+    sections.append(_card("o-vuln", "O.5 Detected Vulnerabilities", _findings_table(vulnerabilities, "overall-vuln", 20), SECTION_DESCRIPTIONS["vulnerabilities"]))
 
     secrets = _filter_findings(unique_findings, SECRET_CATEGORIES)
-    sections.append(_card("o-secrets", "O.6 Выявленные секреты", _findings_table(secrets, "overall-secrets", 20), SECTION_DESCRIPTIONS["secrets"]))
+    sections.append(_card("o-secrets", "O.6 Detected Secrets", _findings_table(secrets, "overall-secrets", 20), SECTION_DESCRIPTIONS["secrets"]))
 
     signing = _filter_findings(unique_findings, SIGNING_CATEGORIES)
-    sections.append(_card("o-supply-chain", "O.7 Цепочка поставок", _findings_table(signing, "overall-signing", 15), "Проблемы подписи и сертификатов."))
+    sections.append(_card("o-supply-chain", "O.7 Supply Chain", _findings_table(signing, "overall-signing", 15), "Signature and certificate issues."))
 
     high_count = sum(1 for finding in unique_findings if finding.severity == "high")
     medium_findings = [finding for finding in unique_findings if finding.severity == "medium"]
-    verdict = "Выявлены признаки, требующие дополнительного анализа"
-    reason = "Найдены high/medium findings, требующие экспертной валидации."
+    verdict = "Indicators requiring further analysis were detected."
+    reason = "High/medium findings require expert validation."
     if high_count == 0 and len(medium_findings) <= 3 and all(item.confidence == "C1" for item in medium_findings):
-        verdict = "Признаки, требующие дополнительного анализа, не выявлены"
-        reason = "High findings отсутствуют, medium findings в пределах порога и с confidence C1."
+        verdict = "No indicators requiring further analysis were detected."
+        reason = "No high findings; medium findings are within threshold and confidence C1."
     verdict_html = f"<p><strong>{html.escape(verdict)}</strong></p><p class='muted'>{html.escape(reason)}</p>"
-    sections.append(_card("o-verdict", "O.8 Итоговая оценка", verdict_html, SECTION_DESCRIPTIONS["overall_verdict"]))
+    sections.append(_card("o-verdict", "O.8 Final Assessment", verdict_html, SECTION_DESCRIPTIONS["overall_verdict"]))
 
     summary_html = _artifacts_table(report) + _notes_block(report)
-    sections.append(_card("o-artifacts", "O.9 Артефакты и примечания", summary_html, "Ссылки на итоговые артефакты и служебные заметки."))
+    sections.append(_card("o-artifacts", "O.9 Artifacts and Notes", summary_html, "Links to final artifacts and operational notes."))
     return sections
 
 
@@ -664,7 +664,7 @@ def _render_header(report: ReportV2) -> str:
         f"<p class='muted brand-desc'>Schema: {html.escape(report.schema_version)} | Stage: {html.escape(report.stage)}</p>"
         "</div>"
         "<div class='header-actions'>"
-        "<button class='btn-link' onclick='window.print()'>Печать / Export PDF</button>"
+        "<button class='btn-link' onclick='window.print()'>Print / Export PDF</button>"
         "</div>"
         "</header>"
     )
@@ -674,14 +674,14 @@ def _render_toc(cards: list[tuple[str, str, str]]) -> str:
     items = "".join(
         f"<li><a href='#{html.escape(section_id)}'>{html.escape(title)}</a></li>" for section_id, title, _ in cards
     )
-    return f"<section class='card'><h2>Содержание</h2><ul class='toc'>{items}</ul></section>"
+    return f"<section class='card'><h2>Contents</h2><ul class='toc'>{items}</ul></section>"
 
 
 def _render_document(report: ReportV2, cards: list[tuple[str, str, str]]) -> str:
     body = "".join(card_html for _, _, card_html in cards)
     return f"""
 <!doctype html>
-<html lang="ru">
+<html lang="en">
 <head>
   <meta charset="utf-8"/>
   <title>{html.escape(APP_NAME)} Report</title>
@@ -733,7 +733,7 @@ def _render_document(report: ReportV2, cards: list[tuple[str, str, str]]) -> str
       const node = document.getElementById(id);
       if (!node) return;
       const hidden = node.classList.toggle('hidden');
-      if (btn) btn.textContent = hidden ? 'Показать все' : 'Свернуть';
+      if (btn) btn.textContent = hidden ? 'Show all' : 'Collapse';
     }}
     function tapkaCopy(value) {{
       if (!navigator.clipboard) return;

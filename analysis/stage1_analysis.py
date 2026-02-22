@@ -420,7 +420,7 @@ class Stage1StaticRunner:
             "tags": set(),
             "source": "anti_debug",
         },
-        # --- Небезопасная криптография ---
+        # --- Weak cryptography ---
         {
             "category": "sec_weak_crypto",
             "pattern": r'Cipher\.getInstance\(\s*"(AES/ECB|DES|DESede|RC4|RC2|Blowfish)|MessageDigest\.getInstance\(\s*"(MD5|SHA-1)"',
@@ -430,7 +430,7 @@ class Stage1StaticRunner:
             "tags": set(),
             "source": "weak_crypto",
         },
-        # --- Предсказуемый ГПСЧ ---
+        # --- Predictable PRNG ---
         {
             "category": "sec_predictable_random",
             "pattern": r"SecureRandom.*\.setSeed\(\s*(System\.currentTimeMillis|System\.nanoTime|new\s+Date)",
@@ -440,7 +440,7 @@ class Stage1StaticRunner:
             "tags": set(),
             "source": "predictable_random",
         },
-        # --- Глобально доступные файлы ---
+        # --- World-readable/writable files ---
         {
             "category": "sec_world_readable_writable",
             "pattern": r"MODE_WORLD_READABLE|MODE_WORLD_WRITABLE",
@@ -450,7 +450,7 @@ class Stage1StaticRunner:
             "tags": set(),
             "source": "world_rw",
         },
-        # --- Запись на SD ---
+        # --- Sensitive data on external storage ---
         {
             "category": "sec_external_storage_sensitive",
             "pattern": r"getExternalStorageDirectory|getExternalFilesDir",
@@ -480,7 +480,7 @@ class Stage1StaticRunner:
             "tags": set(),
             "source": "sql_injection",
         },
-        # --- Логирование чувствительных данных ---
+        # --- Sensitive data logging ---
         {
             "category": "sec_log_sensitive_data",
             "pattern": r"Log\.[dviwé]\([^)]*(?i)(password|passwd|token|secret|apikey|api_key|credential|ssn|credit.?card)",
@@ -490,7 +490,7 @@ class Stage1StaticRunner:
             "tags": set(),
             "source": "log_sensitive",
         },
-        # --- SharedPreferences + секреты ---
+        # --- SharedPreferences + secrets ---
         {
             "category": "sec_sharedprefs_sensitive",
             "pattern": r"\.edit\(\)\.put(?:String|Int|Long)\([^)]*(?i)(password|token|secret|api.?key|private.?key|credential)",
@@ -500,7 +500,7 @@ class Stage1StaticRunner:
             "tags": set(),
             "source": "sharedprefs_sensitive",
         },
-        # --- SharedPreferences + секреты (split-variable: editor.putString("key", ...)) ---
+        # --- SharedPreferences + secrets (split variable: editor.putString("key", ...)) ---
         {
             "category": "sec_sharedprefs_sensitive",
             "pattern": r'\.putString\(\s*"[^"]*(?i:password|token|secret|api.?key|private.?key|credential|encrypt)[^"]*"\s*,',
@@ -591,7 +591,7 @@ class Stage1StaticRunner:
             "tags": set(),
             "source": "device_admin",
         },
-        # --- Certificate pinning (info, не уязвимость) ---
+        # --- Certificate pinning (informational, not a vulnerability) ---
         {
             "category": "sec_certificate_pinning",
             "pattern": r'CertificatePinner|\.check\(\s*"[^"]+"\s*,\s*"sha256/',
@@ -1221,9 +1221,9 @@ class Stage1StaticRunner:
                 stdout_path=str(stdout_path),
                 stderr_path=str(stderr_path),
             )
-        # YARA 4.x принимает только ОДИН target (последний аргумент).
-        # Все предыдущие аргументы воспринимаются как файлы правил.
-        # Запускаем YARA отдельно для каждой директории и объединяем stdout.
+        # YARA 4.x accepts only ONE target (the last argument).
+        # Previous arguments are treated as rule files.
+        # Run YARA per directory and merge stdout.
         combined_stdout_parts: list[str] = []
         combined_stderr_parts: list[str] = []
         last_result = None
@@ -1292,7 +1292,7 @@ class Stage1StaticRunner:
 
     @staticmethod
     def _is_lib_path(file_path: str) -> bool:
-        """True если путь файла указывает на известную стороннюю библиотеку."""
+        """Return True if the file path points to a known third-party library."""
         for marker in ("sources/", "smali/"):
             idx = file_path.find(marker)
             if idx >= 0:
@@ -1312,7 +1312,7 @@ class Stage1StaticRunner:
         base_target: Path,
         package_path: str,
     ) -> list[Path]:
-        """Вернуть список директорий для rg в зависимости от scope."""
+        """Return rg target directories for the given scope."""
         if scope == "full" or not package_path:
             return [base_target]
 
@@ -1377,7 +1377,7 @@ class Stage1StaticRunner:
                 scope = spec.get("scope", "app")
                 scan_targets = self._resolve_scope_targets(scope, label, base_target, package_path)
                 for idx, target in enumerate(scan_targets):
-                    # Только первый target считается как шаг прогресса — остальные не влияют на счётчик
+                    # Only the first target counts as a progress step.
                     effective_run_step = run_step if idx == 0 else (lambda lbl, fn: fn())
                     rg_findings, result = self._rg_findings(
                         spec=spec,
@@ -2262,7 +2262,7 @@ class Stage1StaticRunner:
             line = line.strip()
             if not line:
                 continue
-            # Пропустить string-match-detail строки (формат: 0xOFFSET:$STRING_ID: matched_data)
+            # Skip string-match-detail lines (format: 0xOFFSET:$STRING_ID: matched_data).
             first_token = line.split(maxsplit=1)[0]
             if ":" in first_token:
                 continue
@@ -2270,14 +2270,14 @@ class Stage1StaticRunner:
             if len(parts) != 2:
                 continue
             rule_name, file_path = parts[0].strip(), parts[1].strip()
-            # Валидное имя YARA-правила: только буквы, цифры, _
+            # Valid YARA rule name: letters, digits, underscore.
             if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', rule_name):
                 continue
             mapping = self.YARA_RULE_CATEGORY.get(rule_name)
             if mapping:
                 category, tags = mapping
             else:
-                # Fallback для пользовательских/неизвестных YARA-правил
+                # Fallback for custom/unknown YARA rules.
                 category = f"yara_unknown_{rule_name.lower()}"
                 tags = set()
             finding_confidence = "C2"
@@ -2345,7 +2345,7 @@ class Stage1StaticRunner:
         return self._dedupe_findings(findings)
 
     def _extract_cleartext_http_findings(self, findings: list[Finding], run_dir: Path) -> list[Finding]:
-        """Из secret_endpoints_hardcoded выделить http:// endpoints как отдельную категорию."""
+        """Extract http:// endpoints from secret_endpoints_hardcoded into a separate category."""
         from urllib.parse import urlparse
 
         NOISE_HOSTS = {
@@ -2389,7 +2389,7 @@ class Stage1StaticRunner:
         return new_findings
 
     def _correlate_intent_injection(self, findings: list[Finding], run_dir: Path) -> list[Finding]:
-        """Exported component + getStringExtra в том же классе → intent injection indicator."""
+        """Exported component + getStringExtra in the same class -> intent injection indicator."""
         exported_classes: set[str] = set()
         for f in findings:
             if f.category != "vul_exported_component_no_permission":
@@ -2531,7 +2531,7 @@ class Stage1StaticRunner:
             "persist_jobscheduler_periodic",
             "persist_alarmmanager_repeating",
         }
-        # Persistence boost срабатывает только от app-scope findings (не из библиотек)
+        # Apply persistence boost only when app-scope findings trigger it.
         has_persistence = any(
             f.category in persistence_categories
             and "lib_noise" not in (f.tags or set())
@@ -2548,14 +2548,14 @@ class Stage1StaticRunner:
                 for source in (finding.sources or [])
             ):
                 continue
-            # Не добавлять persistence к findings из библиотек
+            # Do not add persistence tag to findings from library code.
             if self._is_lib_path(finding.file_path or ""):
                 continue
             finding.tags.add("persistence")
         return findings
 
     def _apply_combo_boosts(self, findings: list[Finding]) -> list[Finding]:
-        """Повысить confidence при наличии подтверждающих комбинаций."""
+        """Increase confidence when confirming combinations are present."""
         categories = {f.category for f in findings}
         has_persistence = bool(
             categories
