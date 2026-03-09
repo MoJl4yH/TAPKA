@@ -8,7 +8,7 @@ from pathlib import Path
 
 from analysis.runtime.clock import now_utc_iso
 from analysis.runtime.context import RunContext
-from analysis.stages import STAGE_CROSS_TOOL
+from analysis.stages import STAGE_CROSS_TOOL, STAGE_DYNAMIC
 from models import ApkMeta, Project, Run, Finding
 
 class Storage:
@@ -330,6 +330,43 @@ class Storage:
             project_dir=project_dir,
             apk_path=apk_path,
             stage="stage3",
+            run_id=run_id,
+            run_dir=run_dir,
+            started_at=now_utc_iso(),
+        )
+
+    def get_latest_stage2_run_dir(self, project_id: str) -> Path | None:
+        """Return the most recent existing Stage2 run directory, or None."""
+        version_dir = self.get_active_version_dir(project_id)
+        runs_dir = version_dir / "runs"
+        if not runs_dir.exists():
+            return None
+        suffix = f"_{STAGE_DYNAMIC}"
+        run_dirs = [p for p in runs_dir.iterdir() if p.is_dir() and p.name.endswith(suffix)]
+        if not run_dirs:
+            return None
+        run_dirs.sort(key=lambda p: p.name, reverse=True)
+        return run_dirs[0]
+
+    def get_or_create_stage2_run(self, project_id: str) -> RunContext:
+        project_dir = self.get_project_dir(project_id)
+        version_dir = self.get_active_version_dir(project_id)
+        runs_dir = version_dir / "runs"
+        self._ensure_dir(runs_dir)
+        apk_path = self.get_apk_path(project_id)
+        # Always create a fresh run dir for Stage2 — each dynamic run is independent.
+        # (Reusing an existing dir would corrupt duration_sec and mix artifacts.)
+        run_id = self.generate_run_id(STAGE_DYNAMIC)
+        run_dir = runs_dir / run_id
+        for sub in (
+            "tools/adb_snapshot", "tools/adb_install", "tools/adb_logcat",
+            "tools/adb_traffic", "tools/zeek", "diffs", "logs", "artifacts",
+        ):
+            self._ensure_dir(run_dir / sub)
+        return RunContext(
+            project_dir=project_dir,
+            apk_path=apk_path,
+            stage="stage2",
             run_id=run_id,
             run_dir=run_dir,
             started_at=now_utc_iso(),

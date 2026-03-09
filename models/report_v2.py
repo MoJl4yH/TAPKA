@@ -126,3 +126,4 @@ class ReportV2(BaseModel):
     sections: list[SectionV2] = Field(default_factory=list)
     status: ReportStatusV2 = "ok"
     notes: list[str] = Field(default_factory=list)
+    stage2_data: dict = Field(default_factory=dict)

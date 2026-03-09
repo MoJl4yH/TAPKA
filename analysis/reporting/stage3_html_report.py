@@ -580,8 +580,246 @@ def _render_stage3(report: ReportV2) -> list[tuple[str, str, str]]:
     return sections
 
 
+def _conf_badge(confidence: str) -> str:
+    """Return a colored HTML span for confidence level C1/C2/C3."""
+    cls_map = {"C1": "sev-low", "C2": "sev-medium", "C3": "sev-high"}
+    label_map = {"C1": "C1 (weak)", "C2": "C2 (indirect)", "C3": "C3 (direct)"}
+    c = confidence.upper()
+    css = cls_map.get(c, "")
+    label = label_map.get(c, html.escape(c))
+    return f"<span class='{html.escape(css)}'>{label}</span>" if css else html.escape(confidence)
+
+
+def _render_stage2_attribution(data: dict) -> str:
+    """Render app attribution and exerciser coverage data."""
+    attr = data.get("attribution") or {}
+    cov = data.get("coverage") or {}
+    if not attr and not cov:
+        return "<p class='muted'>Attribution data not collected.</p>"
+
+    out = ""
+    if attr:
+        pid_logcat_empty = attr.get("pid_logcat_empty")
+        pid_captured = attr.get("pid_logcat_captured")
+        died_at = attr.get("app_died_at") or ""
+        rows = [
+            ["Package name", html.escape(str(attr.get("package_name") or "-"))],
+            ["UID", html.escape(str(attr.get("uid") or "-"))],
+            ["PID (initial)", html.escape(str(attr.get("pid_initial") or "-"))],
+            ["PID (first seen)", html.escape(str(attr.get("pid_first_seen") or "-"))],
+            ["PID (last seen)", html.escape(str(attr.get("pid_last_seen") or "-"))],
+            ["App exited early", html.escape("Yes — " + died_at if died_at else "No")],
+            [
+                "PID-filtered logcat",
+                html.escape(
+                    "Captured (empty — app produced no output)"
+                    if pid_captured and pid_logcat_empty
+                    else "Captured"
+                    if pid_captured
+                    else "Not started (PID unresolved)"
+                ),
+            ],
+        ]
+        out += "<h3>Process attribution</h3>"
+        out += _rows_table(["Field", "Value"], rows, "No attribution data.", "s2-attr-table")
+
+    if cov:
+        sent = cov.get("exerciser_events_sent", 0)
+        total = cov.get("exerciser_events_configured", 0)
+        pct = cov.get("exerciser_coverage_pct", -1)
+        dur = cov.get("capture_duration_sec", 0)
+        pct_str = f"{pct}%" if pct >= 0 else "n/a (package unknown)"
+        cov_rows = [
+            ["Exerciser events sent / configured", html.escape(f"{sent} / {total}")],
+            ["Coverage", html.escape(pct_str)],
+            ["Capture duration (s)", html.escape(str(dur))],
+        ]
+        out += "<h3>Exercise coverage</h3>"
+        out += _rows_table(["Metric", "Value"], cov_rows, "No coverage data.", "s2-cov-table")
+
+    return out or "<p class='muted'>No attribution data.</p>"
+
+
+def _render_stage2_findings(data: dict) -> str:
+    """Render dynamic analysis findings (§14 validated, FP/TP gated)."""
+    findings = data.get("findings") or []
+    if not findings:
+        return "<p class='muted'>No dynamic findings generated (run may not have completed, or all findings were suppressed).</p>"
+
+    rows = []
+    for f in findings:
+        fid = html.escape(str(f.get("finding_id", "")))
+        conf = _conf_badge(str(f.get("confidence", "")))
+        title = html.escape(str(f.get("title", "")))
+        detail = html.escape(str(f.get("detail", "")))
+        evidence = html.escape(str(f.get("evidence", "") or ""))
+        rows.append([f"<span class='mono' style='font-size:0.85em'>{fid}</span>", conf, title, detail, evidence])
+
+    return _rows_table(
+        ["Finding ID", "Confidence", "Title", "Detail", "Evidence"],
+        rows,
+        "No findings.",
+        "s2-findings-table",
+    )
+
+
+def _render_stage2_environment(data: dict) -> str:
+    env = data.get("environment")
+    if not env:
+        return "<p class='muted'>Section will be populated when the Stage 2 pipeline is implemented.</p>"
+    rows = [
+        ["AVD name", html.escape(str(env.get("avd_name", "-")))],
+        ["API level", html.escape(str(env.get("api_level", "-")))],
+        ["Boot time (s)", html.escape(str(env.get("boot_time_sec", "-")))],
+        ["ADB version", html.escape(str(env.get("adb_version", "-")))],
+    ]
+    return _rows_table(["Parameter", "Value"], rows, "No environment data.", "s2-env-table")
+
+
+def _render_stage2_install(data: dict) -> str:
+    install = data.get("install_diff")
+    if not install:
+        return "<p class='muted'>Data not collected.</p>"
+    new_pkgs = install.get("new_packages") or []
+    new_paths = install.get("new_paths") or []
+    out = ""
+    if new_pkgs:
+        rows = [[html.escape(p)] for p in new_pkgs[:50]]
+        out += "<h3>New packages</h3>" + _rows_table(["Package"], rows, "None.", "s2-install-pkgs")
+    else:
+        out += "<p class='muted'>No new packages detected.</p>"
+    if new_paths:
+        rows2 = [[html.escape(p)] for p in new_paths[:50]]
+        out += "<h3>New filesystem paths</h3>" + _rows_table(["Path"], rows2, "None.", "s2-install-paths")
+    else:
+        out += "<p class='muted'>No new filesystem paths detected.</p>"
+    diff_path = install.get("fs_diff_path") or install.get("diff_path") or ""
+    if diff_path:
+        out += f"<p>Full diff: <span class='mono'>{html.escape(diff_path)}</span></p>"
+    return out
+
+
+def _render_stage2_runtime(data: dict) -> str:
+    rt = data.get("runtime_diff")
+    if not rt:
+        return "<p class='muted'>Data not collected.</p>"
+    out = ""
+
+    logcat_path = rt.get("logcat_path") or ""
+    pid_logcat_path = rt.get("pid_logcat_path") or ""
+    appops_path = rt.get("appops_path") or ""
+    pkg_files_count = rt.get("target_pkg_files_count", 0)
+
+    # Logcat paths
+    artifact_rows = []
+    if logcat_path:
+        artifact_rows.append(["Full logcat", f"<span class='mono'>{html.escape(logcat_path)}</span>"])
+    if pid_logcat_path:
+        artifact_rows.append(["PID-filtered logcat", f"<span class='mono'>{html.escape(pid_logcat_path)}</span>"])
+    if appops_path:
+        artifact_rows.append(["App ops snapshot", f"<span class='mono'>{html.escape(appops_path)}</span>"])
+    if pkg_files_count:
+        artifact_rows.append(["Target pkg files captured", html.escape(str(pkg_files_count))])
+    if artifact_rows:
+        out += "<h3>Captured runtime artifacts</h3>"
+        out += _rows_table(["Artifact", "Path"], artifact_rows, "None.", "s2-runtime-artifacts")
+
+    # Filesystem changes
+    new_paths = rt.get("new_paths") or []
+    if new_paths:
+        rows = [[html.escape(p)] for p in new_paths[:50]]
+        out += "<h3>Runtime filesystem changes</h3>" + _rows_table(
+            ["Path"], rows, "None.", "s2-runtime-paths"
+        )
+    else:
+        out += "<p class='muted'>No new runtime filesystem paths detected.</p>"
+
+    diff_path = rt.get("fs_diff_path") or rt.get("diff_path") or ""
+    if diff_path:
+        out += f"<p>Full diff: <span class='mono'>{html.escape(diff_path)}</span></p>"
+
+    return out or "<p class='muted'>Data not collected.</p>"
+
+
+def _render_stage2_network(data: dict) -> str:
+    net = data.get("network")
+    if not net:
+        return "<p class='muted'>Data not collected.</p>"
+
+    rows = [
+        ["Unique IPs", html.escape(str(net.get("unique_ips", 0)))],
+        ["Unique domains", html.escape(str(net.get("unique_domains", 0)))],
+        ["Zeek/tshark analysis", html.escape("Yes" if net.get("zeek_available") else "No (pcap saved)")],
+        ["PCAP path", html.escape(str(net.get("pcap_path") or "-"))],
+    ]
+    out = _rows_table(["Metric", "Value"], rows, "No network data.", "s2-net-summary")
+
+    # Top hosts
+    top_hosts = net.get("top_hosts") or []
+    if top_hosts:
+        host_rows = [[html.escape(h)] for h in top_hosts]
+        out += "<h3>Top observed hosts</h3>" + _rows_table(
+            ["Host"], host_rows, "None.", "s2-net-hosts"
+        )
+
+    # Tshark alert rules triggered
+    alerts = net.get("tshark_alerts_summary") or []
+    if alerts:
+        alert_rows = [
+            [
+                f"<span class='mono' style='font-size:0.85em'>{html.escape(str(a.get('rule_id', '')))}</span>",
+                _conf_badge(str(a.get("confidence", ""))),
+                html.escape(str(a.get("title", ""))),
+            ]
+            for a in alerts
+        ]
+        out += "<h3>Threat alert rules triggered</h3>"
+        out += _rows_table(
+            ["Rule ID", "Confidence", "Title"],
+            alert_rows,
+            "No alerts.",
+            "s2-net-alerts",
+        )
+        alerts_path = net.get("tshark_alerts_path") or ""
+        if alerts_path:
+            out += f"<p>Full alert detail: <span class='mono'>{html.escape(alerts_path)}</span></p>"
+    else:
+        out += "<p class='muted'>No tshark threat alert rules triggered.</p>"
+
+    # TSV export files
+    tsv_files = net.get("tshark_tsv_files") or {}
+    if tsv_files:
+        tsv_rows = [
+            [html.escape(name), f"<span class='mono'>{html.escape(path)}</span>"]
+            for name, path in sorted(tsv_files.items())
+            if path and str(path).startswith("/")
+        ]
+        if tsv_rows:
+            out += "<h3>TShark TSV exports</h3>"
+            out += _rows_table(["Export name", "Path"], tsv_rows, "None.", "s2-net-tsv")
+
+    # Zeek logs (filter to real file paths)
+    captured_files = {
+        k: v for k, v in (net.get("zeek_logs") or {}).items()
+        if v and str(v).startswith("/")
+    }
+    if captured_files:
+        log_rows = [
+            [html.escape(name), f"<span class='mono'>{html.escape(path)}</span>"]
+            for name, path in sorted(captured_files.items())
+        ]
+        out += "<h3>Zeek log files</h3>" + _rows_table(
+            ["Log name", "Path"], log_rows, "None.", "s2-net-logs"
+        )
+
+    return out
+
+
 def _render_stage2(report: ReportV2) -> list[tuple[str, str, str]]:
     sections: list[tuple[str, str, str]] = []
+    d = report.stage2_data or {}
+
+    # 2.1 — Target identification
     sections.append(
         _card(
             "s2-identification",
@@ -590,14 +828,71 @@ def _render_stage2(report: ReportV2) -> list[tuple[str, str, str]]:
             SECTION_DESCRIPTIONS["identification"],
         )
     )
-    sections.append(_card("s2-environment", "2.2 Runtime Environment", "<p class='muted'>Section will be populated when the Stage 2 pipeline is implemented.</p>", "Emulator, ADB, and network environment parameters."))
-    sections.append(_card("s2-tools", "2.3 Tool Status", _tools_table(report), "Dynamic analysis tool status."))
-    sections.append(_card("s2-install", "2.4 Installation Changes", "<p class='muted'>Data not collected.</p>", SECTION_DESCRIPTIONS["install_changes"]))
-    sections.append(_card("s2-runtime", "2.5 Runtime Behavior", "<p class='muted'>Data not collected.</p>", SECTION_DESCRIPTIONS["runtime_behavior"]))
-    sections.append(_card("s2-network", "2.6 Network Activity", "<p class='muted'>Data not collected.</p>", SECTION_DESCRIPTIONS["network_activity"]))
-    sections.append(_card("s2-correlation", "2.7 Stage 1 Correlation", "<p class='muted'>Data not collected.</p>", "Correlation between static and dynamic indicators."))
+
+    # 2.2 — App attribution & exercise coverage (new)
+    sections.append(_card(
+        "s2-attribution", "2.2 App Attribution & Exercise Coverage",
+        _render_stage2_attribution(d),
+        "Process attribution (UID/PID/logcat), exerciser coverage, and capture duration.",
+    ))
+
+    # 2.3 — Emulator environment
+    sections.append(_card(
+        "s2-environment", "2.3 Runtime Environment",
+        _render_stage2_environment(d),
+        "Emulator, ADB, and network environment parameters.",
+    ))
+
+    # 2.4 — Tool status
+    sections.append(_card("s2-tools", "2.4 Tool Status", _tools_table(report), "Dynamic analysis tool status."))
+
+    # 2.5 — Install changes
+    sections.append(_card(
+        "s2-install", "2.5 Installation Changes",
+        _render_stage2_install(d),
+        SECTION_DESCRIPTIONS["install_changes"],
+    ))
+
+    # 2.6 — Runtime behavior
+    sections.append(_card(
+        "s2-runtime", "2.6 Runtime Behavior",
+        _render_stage2_runtime(d),
+        SECTION_DESCRIPTIONS["runtime_behavior"],
+    ))
+
+    # 2.7 — Network activity (with tshark alerts)
+    sections.append(_card(
+        "s2-network", "2.7 Network Activity",
+        _render_stage2_network(d),
+        SECTION_DESCRIPTIONS["network_activity"],
+    ))
+
+    # 2.8 — Dynamic analysis findings (§14 validated, FP/TP gated)
+    sections.append(_card(
+        "s2-findings", "2.8 Dynamic Analysis Findings",
+        _render_stage2_findings(d),
+        "FP/TP validated dynamic findings. Confidence: C1=weak indicator, C2=strong indirect, C3=direct proof.",
+    ))
+
+    # 2.9 — Stage 1 correlation
+    correlation_html = (
+        "<p class='muted'>Correlation with Stage 1 to be implemented.</p>"
+        if not d.get("correlation")
+        else "<p>Correlation data collected. Manual expert review required.</p>"
+    )
+    sections.append(_card(
+        "s2-correlation", "2.9 Stage 1 Correlation",
+        correlation_html,
+        "Correlation between static and dynamic indicators.",
+    ))
+
+    # 2.10 — Summary
     summary_html = _severity_summary(report) + _artifacts_table(report) + _notes_block(report)
-    sections.append(_card("s2-summary", "2.8 Findings, Artifacts, and Notes Summary", summary_html, "Dynamic stage summary."))
+    sections.append(_card(
+        "s2-summary", "2.10 Artifacts & Notes Summary",
+        summary_html,
+        "Dynamic stage artifacts and error notes.",
+    ))
     return sections
 
 

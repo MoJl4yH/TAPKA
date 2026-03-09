@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 import shutil
@@ -1369,6 +1370,32 @@ class Stage1StaticRunner:
             rg_targets["apktool"] = apktool_dir
         if jadx_dir.exists():
             rg_targets["jadx"] = jadx_dir
+        else:
+            # Emit a coverage warning finding so the analyst knows jadx-only rules
+            # (dynamic code loading, WebView, TLS bypass, etc.) were not executed.
+            jadx_only_categories = [
+                spec["category"]
+                for spec in self.RG_PATTERN_SPECS
+                if tuple(spec.get("targets", ())) == ("jadx",)
+            ]
+            if jadx_only_categories:
+                findings.append(
+                    self._make_finding(
+                        FindingSpec(
+                            category="coverage_warning_jadx_unavailable",
+                            evidence=(
+                                f"jadx decompilation output not available; "
+                                f"{len(jadx_only_categories)} rule(s) skipped: "
+                                + ", ".join(jadx_only_categories[:10])
+                                + ("..." if len(jadx_only_categories) > 10 else "")
+                            ),
+                            confidence="C1",
+                            evidence_type="string",
+                            tags={"coverage"},
+                        ),
+                        run_dir=run_dir,
+                    )
+                )
 
         for label, base_target in rg_targets.items():
             for spec in self.RG_PATTERN_SPECS:
@@ -1419,7 +1446,11 @@ class Stage1StaticRunner:
     ) -> tuple[list[Finding], CommandResult]:
         category = spec["category"]
         pattern = spec["pattern"]
-        label = f"rg_{category}_{source}"
+        # Include a short hash of the target path so that two runs of the same rule
+        # against different scope-targets (e.g. app-scope vs full-scope) write to
+        # distinct log files and do not overwrite each other.
+        target_hash = hashlib.md5(str(target).encode()).hexdigest()[:8]
+        label = f"rg_{category}_{source}_{target_hash}"
         progress_label = f"RG {category} ({source.replace('rg_', '')})"
         result = run_step(
             progress_label,
@@ -2389,32 +2420,56 @@ class Stage1StaticRunner:
         return new_findings
 
     def _correlate_intent_injection(self, findings: list[Finding], run_dir: Path) -> list[Finding]:
-        """Exported component + getStringExtra in the same class -> intent injection indicator."""
-        exported_classes: set[str] = set()
+        """Exported component + getStringExtra in the same class -> intent injection indicator.
+
+        Matching uses the full class FQN converted to a path suffix (e.g.
+        ``com.example.MainActivity`` → ``com/example/MainActivity``) so that
+        inner-class names (``Outer$Inner``), Kotlin-mangled files, and multi-class
+        files are handled correctly — rather than relying on ``Path.stem`` which
+        only captures the last path component and fails on nested/mangled names.
+        """
+        # Map short_name → path_suffix for all exported components.
+        # Strip anonymous/inner class suffixes before converting to path:
+        # "com.example.Outer$Inner" → base "com.example.Outer" → "com/example/Outer"
+        exported_path_suffixes: list[str] = []
         for f in findings:
             if f.category != "vul_exported_component_no_permission":
                 continue
             evidence = f.evidence or ""
             if ":" in evidence:
                 class_fqn = evidence.split(":")[1].split()[0]
-                short_name = class_fqn.rsplit(".", 1)[-1]
-                exported_classes.add(short_name)
+                base_fqn = class_fqn.split("$")[0]  # strip inner/anon class suffix
+                path_suffix = base_fqn.replace(".", "/")
+                exported_path_suffixes.append(path_suffix)
 
-        if not exported_classes:
+        if not exported_path_suffixes:
             return []
 
         new_findings: list[Finding] = []
         for f in findings:
             if f.category != "sec_intent_extra_read":
                 continue
-            file_path = f.file_path or ""
-            file_name = Path(file_path).stem
-            if file_name in exported_classes:
+            file_path = (f.file_path or "").replace("\\", "/")
+            matched = any(
+                file_path.endswith(ps + ".java")
+                or file_path.endswith(ps + ".kt")
+                or file_path.endswith(ps + ".smali")
+                for ps in exported_path_suffixes
+            )
+            if matched:
+                # Derive a display name from the matched path suffix for the evidence string.
+                matched_suffix = next(
+                    ps for ps in exported_path_suffixes
+                    if file_path.endswith(ps + ".java")
+                    or file_path.endswith(ps + ".kt")
+                    or file_path.endswith(ps + ".smali")
+                )
+                class_display = matched_suffix.rsplit("/", 1)[-1]
                 new_findings.append(
                     self._make_finding(
                         FindingSpec(
                             category="sec_intent_injection_in_exported",
-                            evidence=f"Exported {file_name}: reads intent extras without validation",
+                            evidence=f"Exported {class_display}: reads intent extras without validation",
                             file_path=f.file_path or "",
                             line=f.line,
                             column=f.column,
@@ -2524,6 +2579,12 @@ class Stage1StaticRunner:
         filtered.extend(combined)
         return filtered
 
+    # Category prefixes that are semantically related to persistent malicious behaviour
+    # and should receive the "persistence" context tag when a persistence mechanism
+    # is detected in the app.  Vulnerability / transport findings (sec_*, vul_*) are
+    # intentionally excluded — tagging them with "persistence" is misleading.
+    _PERSISTENCE_TAGGABLE_PREFIXES = ("ndv_", "backdoor_", "anomaly_", "secret_")
+
     def _apply_persistence_boost(self, findings: list[Finding]) -> list[Finding]:
         persistence_categories = {
             "persist_boot_completed",
@@ -2551,11 +2612,21 @@ class Stage1StaticRunner:
             # Do not add persistence tag to findings from library code.
             if self._is_lib_path(finding.file_path or ""):
                 continue
+            # Only tag categories that are semantically related to persistent
+            # malicious behaviour; skip vulnerability / transport findings.
+            if not any(
+                finding.category.startswith(p) for p in self._PERSISTENCE_TAGGABLE_PREFIXES
+            ):
+                continue
             finding.tags.add("persistence")
         return findings
 
     def _apply_combo_boosts(self, findings: list[Finding]) -> list[Finding]:
-        """Increase confidence when confirming combinations are present."""
+        """Increase confidence when confirming combinations are present.
+
+        Uses model_copy() to produce new Finding objects instead of mutating
+        existing ones, making this method idempotent and side-effect-free.
+        """
         categories = {f.category for f in findings}
         has_persistence = bool(
             categories
@@ -2576,18 +2647,45 @@ class Stage1StaticRunner:
             ("ndv_dynamic_code_loading_dex", has_network),
             ("ndv_traffic_intercept_vpn", "sec_tls_trust_all" in categories),
         ]
+        result: list[Finding] = []
         for finding in findings:
+            upgraded = finding
             for target_cat, condition in combos:
                 if finding.category == target_cat and condition:
                     if finding.confidence in ("C1", "C2"):
-                        finding.confidence = "C3"
-                        finding.tags.add("combo_confirmed")
-        return findings
+                        upgraded = finding.model_copy(update={
+                            "confidence": "C3",
+                            "tags": finding.tags | {"combo_confirmed"},
+                        })
+                        break
+            result.append(upgraded)
+        return result
 
     def _dedupe_findings(self, findings: list[Finding]) -> list[Finding]:
         seen: set[tuple] = set()
         deduped: list[Finding] = []
+        # First pass: collect all sources per signing category so that when
+        # apksigner and keytool both report the same issue we keep one Finding
+        # with merged provenance rather than two identical-looking entries.
+        signing_sources: dict[str, list[str]] = {}
         for finding in findings:
+            if finding.evidence_type == "signing":
+                signing_sources.setdefault(finding.category, []).extend(
+                    finding.sources or []
+                )
+
+        signing_emitted: set[str] = set()
+        for finding in findings:
+            if finding.evidence_type == "signing":
+                # Semantic key for signing: category only (same cert issue from
+                # apksigner and keytool is one finding, not two).
+                if finding.category in signing_emitted:
+                    continue
+                signing_emitted.add(finding.category)
+                merged_sources = list(dict.fromkeys(signing_sources.get(finding.category, [])))
+                deduped.append(finding.model_copy(update={"sources": merged_sources}))
+                continue
+
             key = (
                 finding.category,
                 finding.evidence,

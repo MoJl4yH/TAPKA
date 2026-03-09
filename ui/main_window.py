@@ -8,8 +8,8 @@ from datetime import datetime
 import re
 from typing import Callable
 
-from PySide6.QtCore import Qt, QUrl, QThread, Signal, QTimer
-from PySide6.QtGui import QDesktopServices, QPixmap, QIcon
+from PySide6.QtCore import Qt, QUrl, QThread, Signal, QTimer, QSize, QPointF, QRectF
+from PySide6.QtGui import QDesktopServices, QPixmap, QIcon, QPainter, QPen, QBrush, QColor, QPolygonF
 from PySide6.QtWidgets import (
     QMainWindow,
     QWidget,
@@ -42,8 +42,10 @@ from PySide6.QtWidgets import (
 
 from analysis.storage import Storage
 from analysis.settings import load_settings, save_settings
-from analysis.stages import STAGES, STAGE_CROSS_TOOL, STAGE_OVERALL, STAGE_STATIC
+from analysis.stages import STAGES, STAGE_CROSS_TOOL, STAGE_DYNAMIC, STAGE_OVERALL, STAGE_STATIC
 from analysis.stage1_analysis import Stage1StaticRunner
+from analysis.stage2.runner import Stage2DynamicRunner
+from analysis.models.stage2 import Stage2Config
 from analysis.mobsf import DEFAULT_MOBSF_URL, ensure_mobsf_ready, normalize_base_url, stop_mobsf
 from analysis.mobsf.stage3_runner import Stage3Config, Stage3MobSFRunner
 from analysis.apkid.stage3_runner import Stage3ApkidConfig, Stage3ApkidRunner
@@ -184,6 +186,28 @@ class Stage3ApkleaksWorker(QThread):
             self.finished.emit(run)
         except Exception:  # pylint: disable=broad-exception-caught
             self.failed.emit(traceback.format_exc())
+
+
+class Stage2Worker(QThread):
+    finished = Signal(object)
+    failed = Signal(str)
+    progress = Signal(str)
+
+    def __init__(self, storage: Storage, project_id: str, config: Stage2Config):
+        super().__init__()
+        self.storage = storage
+        self.project_id = project_id
+        self.config = config
+
+    def run(self) -> None:
+        runner = Stage2DynamicRunner(self.storage, config=self.config, on_progress=self.progress.emit)
+        try:
+            run = runner.run(self.project_id)
+            self.finished.emit(run)
+        except Exception:  # pylint: disable=broad-exception-caught
+            self.failed.emit(traceback.format_exc())
+
+
 class MainWindow(QMainWindow):
     TOOL_STATUS_DEFS = [
         ("apksigner", "APK signature"),
@@ -558,9 +582,7 @@ class MainWindow(QMainWindow):
 
         self.stage_tabs.addTab(self._build_stage1_page(), STAGES[0][1])
         self.stage_tabs.addTab(
-            self._build_stub_stage_page(
-                "Dynamic analysis will be available in a future update.",
-            ),
+            self._build_stage2_page(),
             STAGES[1][1],
         )
         self.stage_tabs.addTab(
@@ -576,6 +598,49 @@ class MainWindow(QMainWindow):
 
         main_layout.addWidget(self.stage_tabs, stretch=1)
 
+    @staticmethod
+    def _make_refresh_icon(size: int = 16, color: str = "#e6e9ee") -> QIcon:
+        import math
+        px = QPixmap(size, size)
+        px.fill(Qt.GlobalColor.transparent)
+        p = QPainter(px)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        c = QColor(color)
+        sw = max(1.5, size / 8.0)
+        m = sw + 1.5
+        r = (size - 2.0 * m) / 2.0
+        cx = cy = size / 2.0
+        # Two arcs
+        pen = QPen(c, sw, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        rect = QRectF(m, m, 2.0 * r, 2.0 * r)
+        p.drawArc(rect, int(170 * 16), int(-140 * 16))  # upper arc CW 170°→30°
+        p.drawArc(rect, int(350 * 16), int(-140 * 16))  # lower arc CW 350°→210°
+        # Arrowheads (filled triangles)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(c))
+        al = size / 5.0
+
+        def _arrow(tip_deg: float) -> None:
+            a = math.radians(tip_deg)
+            tx, ty = cx + r * math.cos(a), cy - r * math.sin(a)
+            # clockwise tangent in screen coords (y-down): (sin θ, cos θ)
+            dx, dy = math.sin(a), math.cos(a)
+            pdx, pdy = -dy, dx  # perpendicular
+            hw = al * 0.4
+            tri = QPolygonF([
+                QPointF(tx, ty),
+                QPointF(tx - al * dx + hw * pdx, ty - al * dy + hw * pdy),
+                QPointF(tx - al * dx - hw * pdx, ty - al * dy - hw * pdy),
+            ])
+            p.drawPolygon(tri)
+
+        _arrow(30)   # end of upper arc
+        _arrow(210)  # end of lower arc
+        p.end()
+        return QIcon(px)
+
     def _build_stage1_page(self) -> QWidget:
         stage1_page = QWidget()
         stage1_layout = QVBoxLayout(stage1_page)
@@ -585,6 +650,292 @@ class MainWindow(QMainWindow):
         stage1_layout.addWidget(self._build_checks_card())
         stage1_layout.addStretch(1)
         return stage1_page
+
+    def _build_stage2_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(12)
+
+        # Config card
+        config_card = QFrame()
+        config_card.setObjectName("card")
+        config_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        config_layout = QVBoxLayout(config_card)
+        config_layout.setContentsMargins(16, 12, 16, 12)
+        config_layout.setSpacing(10)
+
+        header = QLabel("Dynamic analysis")
+        header.setObjectName("sectionTitle")
+        config_layout.addWidget(header)
+
+        hint = QLabel(
+            "Run the APK inside an Android emulator (AVD) and capture filesystem changes, "
+            "logcat output, and network traffic. Requires Android SDK and KVM."
+        )
+        hint.setObjectName("muted")
+        hint.setWordWrap(True)
+        config_layout.addWidget(hint)
+
+        from PySide6.QtWidgets import QSpinBox  # noqa: PLC0415
+
+        LABEL_W = 140
+
+        avd_row = QHBoxLayout()
+        avd_row.setSpacing(6)
+        avd_label = QLabel("Emulator (AVD):")
+        avd_label.setFixedWidth(LABEL_W)
+        avd_row.addWidget(avd_label)
+        self.stage2_avd_combo = QComboBox()
+        self.stage2_avd_combo.setMinimumWidth(180)
+        avd_row.addWidget(self.stage2_avd_combo, stretch=1)
+        self.stage2_avd_refresh_btn = QPushButton()
+        self.stage2_avd_refresh_btn.setIcon(self._make_refresh_icon(14))
+        self.stage2_avd_refresh_btn.setIconSize(QSize(14, 14))
+        self.stage2_avd_refresh_btn.setFixedSize(28, 28)
+        self.stage2_avd_refresh_btn.setToolTip("Refresh AVD list")
+        self.stage2_avd_refresh_btn.clicked.connect(self._refresh_avd_list)
+        avd_row.addWidget(self.stage2_avd_refresh_btn)
+        config_layout.addLayout(avd_row)
+
+        dur_row = QHBoxLayout()
+        dur_row.setSpacing(6)
+        dur_label = QLabel("Capture duration:")
+        dur_label.setFixedWidth(LABEL_W)
+        dur_label.setToolTip(
+            "How long the app runs inside the emulator (in seconds) "
+            "while logcat and network traffic are being captured."
+        )
+        dur_row.addWidget(dur_label)
+        self.stage2_duration_spin = QSpinBox()
+        self.stage2_duration_spin.setRange(10, 600)
+        self.stage2_duration_spin.setValue(60)
+        self.stage2_duration_spin.setSuffix(" s")
+        self.stage2_duration_spin.setToolTip(
+            "How long the app runs inside the emulator (in seconds) "
+            "while logcat and network traffic are being captured."
+        )
+        dur_row.addWidget(self.stage2_duration_spin)
+        dur_row.addStretch()
+        config_layout.addLayout(dur_row)
+
+        self._refresh_avd_list()
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+        self.stage2_run_button = QPushButton("Run Dynamic Analysis")
+        self.stage2_run_button.setObjectName("primaryButton")
+        self.stage2_run_button.clicked.connect(self._run_stage2_analysis)
+        btn_row.addWidget(self.stage2_run_button)
+
+        self.stage2_report_button = QPushButton("Open report")
+        self.stage2_report_button.clicked.connect(self._open_stage2_report)
+        btn_row.addWidget(self.stage2_report_button)
+        btn_row.addStretch()
+        config_layout.addLayout(btn_row)
+
+        # Status bar: current step + elapsed time (hidden when idle)
+        self.stage2_status_bar = QFrame()
+        self.stage2_status_bar.setObjectName("stage2StatusBar")
+        sb_layout = QHBoxLayout(self.stage2_status_bar)
+        sb_layout.setContentsMargins(0, 4, 0, 0)
+        sb_layout.setSpacing(12)
+
+        self.stage2_status_label = QLabel("")
+        self.stage2_status_label.setObjectName("muted")
+        sb_layout.addWidget(self.stage2_status_label, stretch=1)
+
+        self.stage2_elapsed_label = QLabel("")
+        self.stage2_elapsed_label.setObjectName("muted")
+        self.stage2_elapsed_label.setMinimumWidth(55)
+        self.stage2_elapsed_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        sb_layout.addWidget(self.stage2_elapsed_label)
+
+        self.stage2_status_bar.setVisible(False)
+        config_layout.addWidget(self.stage2_status_bar)
+
+        # Progress bar row (same pattern as Stage 1)
+        prog_row = QHBoxLayout()
+        prog_row.setSpacing(10)
+        self.stage2_progress_label = QLabel("Ready")
+        self.stage2_progress_label.setObjectName("muted")
+        prog_row.addWidget(self.stage2_progress_label, stretch=1)
+        self.stage2_progress_bar = QProgressBar()
+        self.stage2_progress_bar.setMinimum(0)
+        self.stage2_progress_bar.setMaximum(1)
+        self.stage2_progress_bar.setValue(0)
+        prog_row.addWidget(self.stage2_progress_bar, stretch=2)
+        config_layout.addLayout(prog_row)
+
+        # Elapsed timer (fires every second while analysis runs)
+        self.stage2_timer = QTimer(self)
+        self.stage2_timer.setInterval(1000)
+        self.stage2_timer.timeout.connect(self._update_stage2_elapsed)
+        self._stage2_start_time: float = 0.0
+
+        layout.addWidget(config_card)
+
+        # Log card
+        log_card = QFrame()
+        log_card.setObjectName("card")
+        log_card_layout = QVBoxLayout(log_card)
+        log_card_layout.setContentsMargins(16, 12, 16, 12)
+        log_card_layout.setSpacing(6)
+        log_header = QLabel("Progress log")
+        log_header.setObjectName("sectionTitle")
+        log_card_layout.addWidget(log_header)
+        self.stage2_log_view = QPlainTextEdit()
+        self.stage2_log_view.setReadOnly(True)
+        self.stage2_log_view.setObjectName("logView")
+        self.stage2_log_view.setMinimumHeight(200)
+        log_card_layout.addWidget(self.stage2_log_view)
+        layout.addWidget(log_card, stretch=1)
+
+        return page
+
+    def _run_stage2_analysis(self) -> None:
+        if not self.current_project:
+            self.stage2_status_label.setText("No project selected.")
+            return
+        if not hasattr(self, "stage2_run_button"):
+            return
+        self.stage2_run_button.setEnabled(False)
+        if hasattr(self, "stage2_log_view") and self.stage2_log_view:
+            self.stage2_log_view.clear()
+        # Start elapsed timer + progress bar
+        self._stage2_start_time = time.monotonic()
+        self.stage2_status_label.setText("Starting…")
+        self.stage2_elapsed_label.setText("00:00")
+        self.stage2_status_bar.setVisible(True)
+        self.stage2_timer.start()
+        self.stage2_progress_bar.setMaximum(0)  # indeterminate animation
+        self.stage2_progress_bar.setValue(0)
+        self.stage2_progress_label.setText("Starting…")
+
+        avd_name = self.stage2_avd_combo.currentText().strip() if hasattr(self, "stage2_avd_combo") else "tapka_api35"
+        config = Stage2Config(
+            avd_name=avd_name or "tapka_api35",
+            runtime_duration_sec=self.stage2_duration_spin.value(),
+        )
+        self.stage2_worker = Stage2Worker(self.storage, self.current_project.project_id, config)
+        self.stage2_worker.progress.connect(self._on_stage2_progress)
+        self.stage2_worker.finished.connect(self._on_stage2_finished)
+        self.stage2_worker.failed.connect(self._on_stage2_failed)
+        self.stage2_worker.start()
+
+    def _refresh_avd_list(self) -> None:
+        """Populate AVD dropdown with all AVDs found on this system."""
+        if not hasattr(self, "stage2_avd_combo") or not self.stage2_avd_combo:
+            return
+        from analysis.stage2._sdk import list_avds  # noqa: PLC0415
+
+        avds = list_avds()
+        current = self.stage2_avd_combo.currentText()
+        self.stage2_avd_combo.clear()
+
+        if avds:
+            self.stage2_avd_combo.addItems(avds)
+            self.stage2_avd_combo.setToolTip("")
+            idx = self.stage2_avd_combo.findText(current)
+            if idx >= 0:
+                self.stage2_avd_combo.setCurrentIndex(idx)
+            else:
+                idx = self.stage2_avd_combo.findText("tapka_api35")
+                if idx >= 0:
+                    self.stage2_avd_combo.setCurrentIndex(idx)
+        else:
+            self.stage2_avd_combo.addItem("tapka_api35")
+            self.stage2_avd_combo.setToolTip("No AVDs found. Run: ./setup.sh --with-stage2")
+
+    def _update_stage2_elapsed(self) -> None:
+        elapsed = int(time.monotonic() - self._stage2_start_time)
+        m, s = divmod(elapsed, 60)
+        h, m = divmod(m, 60)
+        text = f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+        if hasattr(self, "stage2_elapsed_label"):
+            self.stage2_elapsed_label.setText(text)
+
+    def _stage2_elapsed_str(self) -> str:
+        elapsed = int(time.monotonic() - self._stage2_start_time)
+        m, s = divmod(elapsed, 60)
+        h, m = divmod(m, 60)
+        return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+    _STAGE2_TOTAL_STEPS = 10  # Steps 1-10 in runner.py
+
+    def _on_stage2_progress(self, message: str) -> None:
+        if hasattr(self, "stage2_log_view") and self.stage2_log_view:
+            self.stage2_log_view.appendPlainText(message)
+        # Strip timestamp prefix for clean text
+        clean = re.sub(r"^\[\d{2}:\d{2}:\d{2}\]\s*", "", message.strip())
+        if not clean:
+            return
+        # Update status label with current activity
+        if hasattr(self, "stage2_status_label"):
+            self.stage2_status_label.setText(clean[:80] + ("…" if len(clean) > 80 else ""))
+        # Update progress bar when a numbered step starts
+        step_match = re.search(r"\bStep (\d+)\b", clean)
+        if step_match and hasattr(self, "stage2_progress_bar"):
+            step_n = int(step_match.group(1))
+            self.stage2_progress_bar.setMaximum(self._STAGE2_TOTAL_STEPS)
+            self.stage2_progress_bar.setValue(step_n - 1)
+            if hasattr(self, "stage2_progress_label"):
+                self.stage2_progress_label.setText(
+                    f"Step {step_n}/{self._STAGE2_TOTAL_STEPS}"
+                )
+
+    def _on_stage2_finished(self, run: object) -> None:
+        self.stage2_timer.stop()
+        elapsed = self._stage2_elapsed_str()
+        if hasattr(self, "stage2_run_button") and self.stage2_run_button:
+            self.stage2_run_button.setEnabled(True)
+        if hasattr(self, "stage2_status_label"):
+            self.stage2_status_label.setText(f"Done — {elapsed}")
+        if hasattr(self, "stage2_elapsed_label"):
+            self.stage2_elapsed_label.setText("")
+        if hasattr(self, "stage2_progress_bar"):
+            self.stage2_progress_bar.setMaximum(self._STAGE2_TOTAL_STEPS)
+            self.stage2_progress_bar.setValue(self._STAGE2_TOTAL_STEPS)
+        if hasattr(self, "stage2_progress_label"):
+            self.stage2_progress_label.setText(f"Completed — {elapsed}")
+        if hasattr(self, "stage2_log_view") and self.stage2_log_view:
+            self.stage2_log_view.appendPlainText("Dynamic analysis completed.")
+
+    def _on_stage2_failed(self, error: str) -> None:
+        self.stage2_timer.stop()
+        elapsed = self._stage2_elapsed_str()
+        if hasattr(self, "stage2_run_button") and self.stage2_run_button:
+            self.stage2_run_button.setEnabled(True)
+        if hasattr(self, "stage2_status_label"):
+            self.stage2_status_label.setText(f"Failed — {elapsed}")
+        if hasattr(self, "stage2_elapsed_label"):
+            self.stage2_elapsed_label.setText("")
+        if hasattr(self, "stage2_progress_bar"):
+            self.stage2_progress_bar.setMaximum(1)
+            self.stage2_progress_bar.setValue(0)
+        if hasattr(self, "stage2_progress_label"):
+            self.stage2_progress_label.setText(f"Failed — {elapsed}")
+        if hasattr(self, "stage2_log_view") and self.stage2_log_view:
+            self.stage2_log_view.appendPlainText(f"ERROR:\n{error}")
+
+    def _open_stage2_report(self) -> None:
+        if not self.current_project:
+            return
+        from analysis.reporting import ReportManager  # noqa: PLC0415
+        report_manager = ReportManager(self.storage)
+        try:
+            run_dir = self.storage.get_latest_stage2_run_dir(self.current_project.project_id)
+            if run_dir is None:
+                QMessageBox.information(self, "Stage 2", "No dynamic analysis run found.")
+                return
+            _, html_path = report_manager.report_paths(run_dir, STAGE_DYNAMIC)
+        except Exception:  # pylint: disable=broad-exception-caught
+            QMessageBox.information(self, "Stage 2", "No dynamic analysis run found.")
+            return
+        if html_path.exists():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(html_path)))
+        else:
+            QMessageBox.information(self, "Stage 2", "Report not found. Run dynamic analysis first.")
 
     def _build_stage3_page(self) -> QWidget:
         page = QWidget()

@@ -28,16 +28,20 @@ SKIP_APT=0
 SKIP_MOBSF=0
 FORCE_VENV=0
 
+WITH_STAGE2=0
+
 for arg in "$@"; do
     case "$arg" in
-        --skip-apt)   SKIP_APT=1 ;;
-        --skip-mobsf) SKIP_MOBSF=1 ;;
-        --force-venv) FORCE_VENV=1 ;;
+        --skip-apt)    SKIP_APT=1 ;;
+        --skip-mobsf)  SKIP_MOBSF=1 ;;
+        --force-venv)  FORCE_VENV=1 ;;
+        --with-stage2) WITH_STAGE2=1 ;;
         --help|-h)
-            echo "Usage: $0 [--skip-apt] [--skip-mobsf] [--force-venv]"
+            echo "Usage: $0 [--skip-apt] [--skip-mobsf] [--force-venv] [--with-stage2]"
             echo "  --skip-apt    Skip system package installation via apt"
             echo "  --skip-mobsf  Skip MobSF Docker image download"
             echo "  --force-venv  Recreate .venv from scratch"
+            echo "  --with-stage2 Install Android SDK, create AVD, and install Zeek for Stage 2"
             exit 0
             ;;
     esac
@@ -311,3 +315,118 @@ else
 fi
 
 echo -e "${BOLD}════════════════════════════════════════${RESET}"
+
+# --- 10. Stage 2: Android SDK + AVD + Zeek (optional) -------------------------
+if [[ "$WITH_STAGE2" -eq 1 ]]; then
+    step "Stage 2 setup (Android SDK, AVD, Zeek)"
+
+    ANDROID_SDK_ROOT="$HOME/android-sdk"
+    ANDROID_AVD_HOME="$HOME/.config/.android/avd"
+    CMDLINE_TOOLS_URL="https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
+    CMDLINE_TOOLS_ZIP="$ANDROID_SDK_ROOT/cmdline-tools.zip"
+    CMDLINE_TOOLS_DEST="$ANDROID_SDK_ROOT/cmdline-tools/latest"
+
+    export ANDROID_SDK_ROOT
+    export ANDROID_AVD_HOME
+    export PATH="$CMDLINE_TOOLS_DEST/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
+
+    # 10.1 OS dependencies for emulator
+    info "Installing emulator OS dependencies..."
+    sudo apt-get install -y --no-install-recommends \
+        openjdk-17-jdk libgl1 libpulse0 libnss3 libx11-6 libxcomposite1 \
+        libxcursor1 libxdamage1 libxrandr2 libxtst6 \
+        2>&1 | grep -E "^(Selecting|Unpacking|Setting up|Err:|E:)" || true
+    ok "Emulator OS dependencies installed."
+
+    # 10.2 Download cmdline-tools if not present
+    mkdir -p "$ANDROID_SDK_ROOT"
+    if [[ ! -f "$CMDLINE_TOOLS_DEST/bin/sdkmanager" ]]; then
+        info "Downloading Android cmdline-tools..."
+        wget -q -O "$CMDLINE_TOOLS_ZIP" "$CMDLINE_TOOLS_URL" \
+            && ok "Downloaded cmdline-tools." \
+            || { fail "Failed to download cmdline-tools. Check network connectivity."; MISSING_TOOLS+=("cmdline-tools"); }
+
+        if [[ -f "$CMDLINE_TOOLS_ZIP" ]]; then
+            TMP_UNZIP="$ANDROID_SDK_ROOT/_cmdline_unzip"
+            mkdir -p "$TMP_UNZIP"
+            unzip -q "$CMDLINE_TOOLS_ZIP" -d "$TMP_UNZIP"
+            mkdir -p "$CMDLINE_TOOLS_DEST"
+            if [[ -d "$TMP_UNZIP/cmdline-tools" ]]; then
+                cp -r "$TMP_UNZIP/cmdline-tools/." "$CMDLINE_TOOLS_DEST/"
+            else
+                cp -r "$TMP_UNZIP/." "$CMDLINE_TOOLS_DEST/"
+            fi
+            rm -rf "$TMP_UNZIP" "$CMDLINE_TOOLS_ZIP"
+            ok "cmdline-tools installed at $CMDLINE_TOOLS_DEST"
+        fi
+    else
+        ok "cmdline-tools already installed: $CMDLINE_TOOLS_DEST"
+    fi
+
+    # 10.3 Accept licenses and install SDK components
+    if command -v sdkmanager &>/dev/null; then
+        info "Accepting Android SDK licenses..."
+        yes | sdkmanager --licenses >/dev/null 2>&1 || true
+
+        info "Installing platform-tools, emulator, android-35 system image..."
+        sdkmanager \
+            "platform-tools" \
+            "emulator" \
+            "platforms;android-35" \
+            "system-images;android-35;google_apis;x86_64" \
+            && ok "Android SDK components installed." \
+            || { fail "sdkmanager install failed."; MISSING_TOOLS+=("android-sdk-components"); }
+    else
+        warn "sdkmanager not found in PATH. Ensure cmdline-tools are correctly installed."
+        MISSING_TOOLS+=("sdkmanager")
+    fi
+
+    # 10.4 Create AVD if it does not exist
+    if command -v avdmanager &>/dev/null && command -v emulator &>/dev/null; then
+        if emulator -list-avds 2>/dev/null | grep -q "tapka_api35"; then
+            ok "AVD 'tapka_api35' already exists."
+        else
+            info "Creating AVD 'tapka_api35'..."
+            echo "no" | avdmanager create avd \
+                -n tapka_api35 \
+                -k "system-images;android-35;google_apis;x86_64" \
+                --device "pixel_5" \
+                && ok "AVD 'tapka_api35' created." \
+                || { fail "Failed to create AVD."; MISSING_TOOLS+=("avd-tapka_api35"); }
+        fi
+    else
+        warn "avdmanager or emulator not found; skipping AVD creation."
+        MISSING_TOOLS+=("avdmanager")
+    fi
+
+    # 10.5 KVM group check
+    if groups | grep -qw kvm; then
+        ok "User is in the kvm group."
+    else
+        warn "User is NOT in the kvm group. Emulator will be slow without hardware virtualization."
+        echo -e "    Run:\n      ${BOLD}sudo adduser \$USER kvm${RESET}"
+        echo -e "    Then re-login for the change to take effect."
+    fi
+
+    # 10.6 Install tshark for pcap analysis (Zeek is optional but often broken on Kali)
+    if command -v tshark &>/dev/null; then
+        ok "tshark already installed: $(command -v tshark)"
+    else
+        info "Installing tshark (pcap analysis)..."
+        if sudo apt-get install -y tshark 2>/dev/null; then
+            ok "tshark installed."
+        else
+            warn "tshark could not be installed. pcap will be captured but not auto-analyzed."
+        fi
+    fi
+
+    # Zeek is optional and often has broken deps on Kali — just check, don't force-install
+    if command -v zeek &>/dev/null; then
+        ok "Zeek also available: $(command -v zeek) (will be preferred over tshark)"
+    else
+        info "Zeek not installed (optional). tshark will be used for pcap analysis."
+        info "To install Zeek manually: https://zeek.org/get-zeek/"
+    fi
+
+    ok "Stage 2 setup complete."
+fi

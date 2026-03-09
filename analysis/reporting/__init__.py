@@ -332,6 +332,11 @@ def _endpoint_kind(finding: Finding) -> str | None:
         return "url"
     if any(source.startswith("rg:endpoint_ipv4") for source in sources):
         return "ip"
+    # Native strings findings: strings tool produces source "strings:secret_endpoints_*"
+    if any(source.startswith("strings:secret_endpoints_hardcoded") for source in sources):
+        return "url"
+    if any(source.startswith("strings:secret_endpoints_ipv4") for source in sources):
+        return "ip"
     return None
 
 
@@ -419,6 +424,11 @@ class ReportManager:
         report = self._build_stage3_report(project, run, run_dir, mobsf_report, quark_report)
         return self._write_report_files(report, run_dir, STAGE_CROSS_TOOL)
 
+    def generate_stage2(self, run: Run, run_dir: Path, stage2_data: dict) -> tuple[Path, Path]:
+        project = self.storage.load_project(run.project_id)
+        report = self._build_stage2_report(project, run, run_dir, stage2_data)
+        return self._write_report_files(report, run_dir, STAGE_DYNAMIC)
+
     def generate_stage2_stub(self, run: Run, run_dir: Path) -> tuple[Path, Path]:
         report = self._build_stub_report(run, run_dir, STAGE_DYNAMIC, "Dynamic analysis")
         return self._write_report_files(report, run_dir, STAGE_DYNAMIC)
@@ -503,6 +513,54 @@ class ReportManager:
             ],
             status="not_implemented",
             notes=notes,
+        )
+
+    def _build_stage2_report(
+        self,
+        project: Project,
+        run: Run,
+        run_dir: Path,
+        stage2_data: dict,
+    ) -> ReportV2:
+        from analysis.stages import STAGE_DYNAMIC  # noqa: PLC0415 (avoid circular at module level)
+
+        status = _map_run_status(run.status)
+        env = stage2_data.get("environment") or {}
+        tools: list[ToolRunV2] = []
+        if env:
+            tools.append(
+                ToolRunV2(
+                    tool="adb",
+                    status="ok",
+                    version=env.get("adb_version") or "",
+                    cmd="adb",
+                    started_at=run.started_at,
+                    finished_at=run.finished_at,
+                    duration_ms=None,
+                    outputs={},
+                    metrics={
+                        "boot_time_sec": env.get("boot_time_sec", 0),
+                        "avd_name": env.get("avd_name", ""),
+                        "api_level": env.get("api_level", 0),
+                    },
+                    details=None,
+                )
+            )
+
+        return ReportV2(
+            report_type="stage",
+            stage=STAGE_DYNAMIC,
+            generated_at=now_utc_iso(),
+            project=self._project_ref(project, STAGE_DYNAMIC, run_dir),
+            run=self._run_ref(run, run_dir, status=status),
+            tools=tools,
+            artifacts=self._collect_artifacts(run_dir, STAGE_DYNAMIC),
+            indicators=[],
+            findings=[],
+            sections=[],
+            status=status,
+            notes=list(run.errors) if run.errors else [],
+            stage2_data=stage2_data,
         )
 
     def _build_stage1_report(
@@ -2272,6 +2330,24 @@ class ReportManager:
                     for nested in sorted(tool_path.rglob("*")):
                         if nested.is_file():
                             add_path(nested)
+
+        if stage == STAGE_DYNAMIC:
+            tools_dir = run_dir / "tools"
+            if tools_dir.exists():
+                for tool_path in sorted(path for path in tools_dir.iterdir() if path.is_dir()):
+                    add_path(tool_path)
+                    for nested in sorted(tool_path.rglob("*")):
+                        if nested.is_file():
+                            add_path(nested)
+            diffs_dir = run_dir / "diffs"
+            if diffs_dir.exists():
+                for path in sorted(diffs_dir.iterdir()):
+                    add_path(path)
+            artifacts_subdir = run_dir / "artifacts"
+            if artifacts_subdir.exists():
+                for path in sorted(artifacts_subdir.rglob("*")):
+                    if path.is_file():
+                        add_path(path)
 
         refs: list[ArtifactRefV2] = []
         for rel in sorted(collected):
