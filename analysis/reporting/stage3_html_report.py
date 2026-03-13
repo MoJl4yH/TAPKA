@@ -829,6 +829,59 @@ def _render_stage2_network(data: dict) -> str:
     return out
 
 
+def _render_stage2_correlation(data: dict) -> str:
+    correlation = data.get("correlation")
+    if not correlation:
+        return "<p class='muted'>Корреляция с этапом 1 не выполнялась.</p>"
+
+    out = ""
+    source_path = correlation.get("source_stage1_findings_path") or ""
+    if source_path:
+        out += (
+            "<p>Источник Stage1 findings: "
+            f"<span class='mono'>{html.escape(str(source_path))}</span></p>"
+        )
+
+    confirmed = correlation.get("confirmed_indicators") or []
+    unconfirmed = correlation.get("unconfirmed_indicators") or []
+
+    if confirmed:
+        rows = [
+            [
+                f"<span class='mono'>{html.escape(str(item.get('category', '')))}</span>",
+                html.escape(str(item.get("evidence", ""))),
+            ]
+            for item in confirmed
+        ]
+        out += "<h3>Подтверждённые статические индикаторы</h3>"
+        out += _rows_table(
+            ["Категория", "Подтверждение Stage2"],
+            rows,
+            "Отсутствуют.",
+            "s2-correlation-confirmed",
+        )
+    else:
+        out += "<p class='muted'>Подтверждённых Stage1 индикаторов не обнаружено.</p>"
+
+    if unconfirmed:
+        rows = [
+            [
+                f"<span class='mono'>{html.escape(str(item.get('category', '')))}</span>",
+                html.escape(str(item.get("evidence", ""))),
+            ]
+            for item in unconfirmed
+        ]
+        out += "<h3>Неподтверждённые Stage1 индикаторы</h3>"
+        out += _rows_table(
+            ["Категория", "Ожидаемый runtime-сигнал"],
+            rows,
+            "Отсутствуют.",
+            "s2-correlation-unconfirmed",
+        )
+
+    return out or "<p class='muted'>Корреляционные данные отсутствуют.</p>"
+
+
 def _render_stage2(report: ReportV2) -> list[tuple[str, str, str]]:
     sections: list[tuple[str, str, str]] = []
     d = report.stage2_data or {}
@@ -889,14 +942,9 @@ def _render_stage2(report: ReportV2) -> list[tuple[str, str, str]]:
     ))
 
     # 2.9 — Stage 1 correlation
-    correlation_html = (
-        "<p class='muted'>Корреляция с этапом 1 будет добавлена в следующих версиях.</p>"
-        if not d.get("correlation")
-        else "<p>Данные корреляции собраны. Требуется ручная экспертная оценка.</p>"
-    )
     sections.append(_card(
         "s2-correlation", "2.9 Корреляция с этапом 1",
-        correlation_html,
+        _render_stage2_correlation(d),
         "Корреляция между статическими и динамическими индикаторами.",
     ))
 

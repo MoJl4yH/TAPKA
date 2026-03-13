@@ -194,7 +194,7 @@ rule ANDROID_Traffic_Interception_VPN_TUN
     $pcap1 = "pcap" nocase ascii
     $pcap2 = "tcpdump" nocase ascii
   condition:
-    3 of ($v*) and (any of ($tun*) or any of ($pcap*))
+    ($v1 or $v2) and $v3 and ($v4 or $v5 or $v6) and (any of ($tun*) or any of ($pcap*))
 }
 
 rule ANDROID_TLS_TrustAll_or_MITM_Indicators
@@ -279,7 +279,6 @@ rule ANDROID_Anti_Tamper_Signature_Check
     $sig3 = "hashCode" ascii
     $kill1 = "Process.killProcess" ascii
     $kill2 = "System.exit" ascii
-    $kill3 = "finish()" ascii
   condition:
-    2 of ($sig*) and 1 of ($kill*)
+    2 of ($sig*) and 1 of ($kill1, $kill2)
 }

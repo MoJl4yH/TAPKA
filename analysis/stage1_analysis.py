@@ -176,13 +176,44 @@ class Stage1StaticRunner:
             "source": "dex_class_loader",
         },
         {
-            "category": "ndv_payload_decode_load",
-            "pattern": r"Base64\.decode.*DexClassLoader|DexClassLoader.*Base64\.decode|Cipher\.doFinal.*loadDex|loadDex.*Cipher\.doFinal",
+            "category": "signal_payload_decode",
+            "pattern": r"Base64\.decode\(",
             "targets": ("jadx",),
-            "confidence": "C3",
+            "scope": "app",
+            "confidence": "C1",
             "evidence_type": "code",
-            "tags": {"dynamic_code"},
-            "source": "payload_decode_load",
+            "tags": set(),
+            "source": "payload_decode_base64",
+        },
+        {
+            "category": "signal_payload_decode",
+            "pattern": r"Cipher\.doFinal\(",
+            "targets": ("jadx",),
+            "scope": "app",
+            "confidence": "C1",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "payload_decode_cipher",
+        },
+        {
+            "category": "signal_download_manager",
+            "pattern": r"DownloadManager\.enqueue\(|DownloadManager\.Request\(",
+            "targets": ("jadx",),
+            "scope": "app",
+            "confidence": "C2",
+            "evidence_type": "code",
+            "tags": {"network"},
+            "source": "download_manager",
+        },
+        {
+            "category": "ndv_reflection_heavy",
+            "pattern": r"Class\.forName\(|\.getDeclaredMethod\(|\.getDeclaredField\(|Method\.invoke\(",
+            "targets": ("jadx",),
+            "scope": "app",
+            "confidence": "C1",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "reflection",
         },
         {
             "category": "ndv_remote_command_shell",
@@ -1752,24 +1783,105 @@ class Stage1StaticRunner:
             return int(target_sdk)
         return None
 
-    def _manifest_app_flags(self, application, ns: str) -> tuple[bool, bool, bool, str | None, set[str]]:
+    def _manifest_app_flags(
+        self,
+        application,
+        ns: str,
+    ) -> tuple[bool, bool, bool, str | None, str | None, set[str]]:
         debuggable = False
         allow_backup = False
         uses_cleartext = False
         full_backup_content = None
+        network_security_config = None
         foreground_types: set[str] = set()
         if application is None:
-            return debuggable, allow_backup, uses_cleartext, full_backup_content, foreground_types
+            return (
+                debuggable,
+                allow_backup,
+                uses_cleartext,
+                full_backup_content,
+                network_security_config,
+                foreground_types,
+            )
         debuggable = (application.get(f"{ns}debuggable") or "false").lower() == "true"
         allow_backup = (application.get(f"{ns}allowBackup") or "false").lower() == "true"
         uses_cleartext = (application.get(f"{ns}usesCleartextTraffic") or "false").lower() == "true"
         full_backup_content = application.get(f"{ns}fullBackupContent")
+        network_security_config = application.get(f"{ns}networkSecurityConfig")
         for service in application.findall("service"):
             fst = service.get(f"{ns}foregroundServiceType")
             if fst:
                 for item in fst.split("|"):
                     foreground_types.add(item.strip())
-        return debuggable, allow_backup, uses_cleartext, full_backup_content, foreground_types
+        return (
+            debuggable,
+            allow_backup,
+            uses_cleartext,
+            full_backup_content,
+            network_security_config,
+            foreground_types,
+        )
+
+    @staticmethod
+    def _xml_local_name(tag: str) -> str:
+        return tag.rsplit("}", 1)[-1] if "}" in tag else tag
+
+    def _resolve_xml_resource_path(self, apktool_dir: Path, resource_ref: str | None) -> Path | None:
+        if not resource_ref:
+            return None
+        match = re.match(r"@(?:[\w.]+:)?xml/([A-Za-z0-9_.-]+)$", resource_ref.strip())
+        if not match:
+            return None
+        return apktool_dir / "res" / "xml" / f"{match.group(1)}.xml"
+
+    def _add_network_security_config_findings(
+        self,
+        findings: list[Finding],
+        apktool_dir: Path,
+        run_dir: Path,
+        network_security_config_ref: str | None,
+    ) -> None:
+        nsc_path = self._resolve_xml_resource_path(apktool_dir, network_security_config_ref)
+        if nsc_path is None or not nsc_path.exists():
+            return
+
+        try:
+            tree = ET.parse(nsc_path)
+            root = tree.getroot()
+        except (ET.ParseError, OSError):
+            return
+
+        has_user_certs = False
+        has_cleartext = False
+        for elem in root.iter():
+            tag = self._xml_local_name(elem.tag)
+            if tag == "certificates" and (elem.get("src") or "").strip().lower() == "user":
+                has_user_certs = True
+            elif tag in {"base-config", "domain-config"}:
+                cleartext = (elem.get("cleartextTrafficPermitted") or "").strip().lower()
+                if cleartext == "true":
+                    has_cleartext = True
+
+        if has_user_certs:
+            self._add_manifest_finding(
+                findings,
+                nsc_path,
+                run_dir,
+                "sec_network_security_config_weak",
+                "networkSecurityConfig разрешает пользовательские CA (<certificates src=\"user\"/>)",
+                tags={"mitm_enabler"},
+                sources=["manifest:networkSecurityConfig:user_ca"],
+            )
+        if has_cleartext:
+            self._add_manifest_finding(
+                findings,
+                nsc_path,
+                run_dir,
+                "sec_network_security_config_weak",
+                "networkSecurityConfig разрешает cleartextTrafficPermitted=true",
+                tags={"network", "mitm_enabler"},
+                sources=["manifest:networkSecurityConfig:cleartext"],
+            )
 
     def _add_manifest_permission_findings(
         self,
@@ -2081,9 +2193,14 @@ class Stage1StaticRunner:
             meta["target_sdk"] = target_sdk
 
         application = root.find("application")
-        debuggable, allow_backup, uses_cleartext, full_backup_content, foreground_types = (
-            self._manifest_app_flags(application, ns)
-        )
+        (
+            debuggable,
+            allow_backup,
+            uses_cleartext,
+            full_backup_content,
+            network_security_config,
+            foreground_types,
+        ) = self._manifest_app_flags(application, ns)
 
         if debuggable:
             self._add_manifest_finding(
@@ -2116,6 +2233,12 @@ class Stage1StaticRunner:
                 tags={"mitm_enabler", "network"},
                 sources=["manifest:usesCleartextTraffic"],
             )
+        self._add_network_security_config_findings(
+            findings,
+            apktool_dir,
+            run_dir,
+            network_security_config,
+        )
 
         self._add_manifest_permission_findings(
             findings,
@@ -2381,11 +2504,13 @@ class Stage1StaticRunner:
     def _post_process_findings(self, findings: list[Finding], run_dir: Path) -> list[Finding]:
         findings = self._aggregate_reflection_findings(findings, run_dir)
         findings = self._apply_download_execute(findings, run_dir)
+        findings.extend(self._correlate_payload_decode_load(findings, run_dir))
         findings = self._apply_persistence_boost(findings)
         findings = self._apply_combo_boosts(findings)
         findings.extend(self._extract_cleartext_http_findings(findings, run_dir))
         findings.extend(self._correlate_intent_injection(findings, run_dir))
         findings.extend(self._correlate_webview_file_xss(findings, run_dir))
+        findings = self._strip_internal_signal_findings(findings)
         return self._dedupe_findings(findings)
 
     def _extract_cleartext_http_findings(self, findings: list[Finding], run_dir: Path) -> list[Finding]:
@@ -2529,11 +2654,51 @@ class Stage1StaticRunner:
             )
         ]
 
+    def _correlate_payload_decode_load(self, findings: list[Finding], run_dir: Path) -> list[Finding]:
+        """Decode/decrypt signal + dynamic DEX loading in the same file -> staged payload."""
+        decode_hits = [f for f in findings if f.category == "signal_payload_decode"]
+        if not decode_hits:
+            return []
+
+        loader_by_path: dict[str, Finding] = {}
+        for finding in findings:
+            if finding.category == "ndv_dynamic_code_loading_dex" and finding.file_path:
+                loader_by_path.setdefault(finding.file_path, finding)
+        if not loader_by_path:
+            return []
+
+        new_findings: list[Finding] = []
+        emitted_paths: set[str] = set()
+        for decode in decode_hits:
+            file_path = decode.file_path or ""
+            if not file_path or file_path not in loader_by_path or file_path in emitted_paths:
+                continue
+            loader = loader_by_path[file_path]
+            emitted_paths.add(file_path)
+            new_findings.append(
+                self._make_finding(
+                    FindingSpec(
+                        category="ndv_payload_decode_load",
+                        evidence="Обнаружены декодирование/расшифровка payload и динамическая загрузка DEX в одном файле",
+                        file_path=file_path,
+                        line=loader.line or decode.line,
+                        column=loader.column or decode.column,
+                        confidence="C2",
+                        evidence_type="code",
+                        tags={"dynamic_code"},
+                        sources=["correlation:payload_decode+dex_loader"],
+                        source="correlation:payload_decode+dex_loader",
+                    ),
+                    run_dir=run_dir,
+                )
+            )
+        return new_findings
+
     def _aggregate_reflection_findings(self, findings: list[Finding], run_dir: Path) -> list[Finding]:
         reflection = [finding for finding in findings if finding.category == "ndv_reflection_heavy"]
         if not reflection:
             return findings
-        if len(reflection) < 25:
+        if len(reflection) < 5:
             return [f for f in findings if f.category != "ndv_reflection_heavy"]
         sample = reflection[0]
         aggregated = self._make_finding(
@@ -2594,6 +2759,9 @@ class Stage1StaticRunner:
         filtered = [f for f in findings if f.category != "signal_download_manager"]
         filtered.extend(combined)
         return filtered
+
+    def _strip_internal_signal_findings(self, findings: list[Finding]) -> list[Finding]:
+        return [f for f in findings if not f.category.startswith("signal_")]
 
     # Category prefixes that are semantically related to persistent malicious behaviour
     # and should receive the "persistence" context tag when a persistence mechanism

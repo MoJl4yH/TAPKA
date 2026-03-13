@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import shutil
+from collections import defaultdict
 from pathlib import Path
 from typing import Callable
 
@@ -365,6 +366,7 @@ class ZeekAnalyzer:
         alerts += self._rule_dns_tunneling(dns_rows)
         alerts += self._rule_tls_weakness(tls_rows)
         alerts += self._rule_data_exfiltration(flow_rows, dns_rows)
+        alerts += self._rule_beacon_pattern(flow_rows, dns_rows, capture_duration_sec)
         alerts += self._rule_beacon_window_gate(capture_duration_sec)
 
         return alerts
@@ -645,6 +647,112 @@ class ZeekAnalyzer:
                 "порог_50КБ: да",
             ],
             "analyst_note": "Проверьте атрибуцию: для подтверждения отфильтруйте соединения по UID приложения в /proc/<pid>/net/tcp.",
+        }]
+
+    def _rule_beacon_pattern(
+        self,
+        flow_rows: list[list[str]],
+        dns_rows: list[list[str]],
+        capture_duration_sec: float,
+    ) -> list[dict]:
+        """ndv_beacon_c2_suspected — regular outbound sessions to one host."""
+        if capture_duration_sec > 0 and capture_duration_sec < 120:
+            return []
+
+        ip_to_host: dict[str, str] = {}
+        for row in dns_rows:
+            if len(row) < 5:
+                continue
+            response_flag = row[3].strip().lower() if len(row) > 3 else ""
+            if response_flag not in ("1", "true"):
+                continue
+            name = row[1].strip()
+            answers = []
+            if len(row) > 4:
+                answers.append(row[4].strip())
+            if len(row) > 5:
+                answers.append(row[5].strip())
+            for ip in ",".join(answers).replace(",", " ").split():
+                ip = ip.strip()
+                if ip and ip != "-":
+                    ip_to_host[ip] = name
+
+        connections_by_dst: dict[str, list[float]] = defaultdict(list)
+        seen_sessions: set[tuple[str, str, str]] = set()
+        for row in flow_rows:
+            if len(row) < 11:
+                continue
+            src = row[1].strip()
+            dst = row[4].strip()
+            if not src.startswith(_EMULATOR_SUBNET_PREFIX) or dst.startswith(_EMULATOR_SUBNET_PREFIX):
+                continue
+            try:
+                ts = float(row[0].strip())
+            except ValueError:
+                continue
+
+            tcp_stream = row[8].strip() if len(row) > 8 else ""
+            udp_stream = row[9].strip() if len(row) > 9 else ""
+            dst_port = row[5].strip() or row[6].strip()
+            proto = row[7].strip()
+            if tcp_stream:
+                session_key = (dst, "tcp", tcp_stream)
+            elif udp_stream:
+                session_key = (dst, "udp", udp_stream)
+            else:
+                session_key = (dst, proto or "raw", f"{dst_port}:{int(ts)}")
+            if session_key in seen_sessions:
+                continue
+            seen_sessions.add(session_key)
+            connections_by_dst[dst].append(ts)
+
+        hits: list[dict] = []
+        for dst_ip, timestamps in connections_by_dst.items():
+            if len(timestamps) < 5:
+                continue
+            timestamps.sort()
+            intervals = [timestamps[i + 1] - timestamps[i] for i in range(len(timestamps) - 1)]
+            if not intervals:
+                continue
+            avg = sum(intervals) / len(intervals)
+            if not (30 <= avg <= 3600):
+                continue
+            variance = sum((x - avg) ** 2 for x in intervals) / len(intervals)
+            cv = (variance ** 0.5) / avg if avg else 0.0
+            if cv > 0.3:
+                continue
+
+            hostname = ip_to_host.get(dst_ip, dst_ip)
+            if _is_platform(hostname) or _is_cdn(hostname):
+                continue
+            hits.append({
+                "dst": hostname,
+                "dst_ip": dst_ip,
+                "count": len(timestamps),
+                "interval_s": round(avg, 1),
+                "cv": round(cv, 3),
+            })
+
+        if not hits:
+            return []
+        hits.sort(key=lambda item: (-item["count"], item["cv"]))
+        best = hits[0]
+        return [{
+            "rule_id": "ndv_beacon_c2_suspected",
+            "confidence": "C2",
+            "title": f"Подозрение на beacon-паттерн C2: {best['dst']} (~{best['interval_s']} с)",
+            "detail": (
+                f"Обнаружено {best['count']} регулярных исходящих сессий к {best['dst']} "
+                f"со средним интервалом {best['interval_s']} с и коэффициентом вариации {best['cv']}. "
+                f"Всего узлов с beacon-паттерном: {len(hits)}."
+            ),
+            "evidence": "tshark_flows.tsv",
+            "suppression_checks": [
+                "минимум_5_сессий: да",
+                "платформенные_и_CDN_узлы_исключены: да",
+                f"окно_захвата_достаточно: да ({capture_duration_sec:.0f} с)",
+            ],
+            "analyst_note": "Детектор считает только уникальные сетевые сессии, а не каждый пакет. Проверьте, что узел не относится к ожидаемому telemetry backend приложения.",
         }]
 
     def _rule_beacon_window_gate(self, capture_duration_sec: float) -> list[dict]:

@@ -15,6 +15,7 @@ class SeverityEngine:
         "ndv_reflection_heavy": 2,
         "ndv_download_execute": 4,
         "ndv_payload_decode_load": 5,
+        "ndv_beacon_c2_suspected": 4,
         "ndv_traffic_intercept_vpn": 5,
         "ndv_screen_capture_mediaprojection": 5,
         "ndv_accessibility_surveillance": 4,
@@ -127,6 +128,7 @@ class SeverityEngine:
         "ndv_dynamic_code_loading_dex": "medium",
         "secret_hardcoded_credentials": "medium",
         "sec_hardcoded_crypto_key": "medium",
+        "sec_network_security_config_weak": "medium",
         "ndv_payload_decode_load": "high",
         "supplychain_debug_certificate": "medium",
     }

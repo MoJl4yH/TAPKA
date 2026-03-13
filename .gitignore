@@ -49,3 +49,4 @@ addendum4_quark_oom_fix_1.md
 addendum4_quark_oom_fix_2.md
 .pylintrc
 .review_md/*
+tests/

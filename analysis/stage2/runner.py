@@ -456,10 +456,14 @@ class Stage2DynamicRunner:
                 encoding="utf-8",
             )
 
-            stage2_data["correlation"] = {
-                "confirmed_indicators": [],
-                "new_indicators": [],
-            }
+            stage1_findings, stage1_findings_path = self._load_stage1_findings(run_dir, log)
+            stage2_data["correlation"] = self._correlate_with_stage1(
+                stage1_findings=stage1_findings,
+                stage1_findings_path=stage1_findings_path,
+                appops_path=appops_path,
+                runtime_new_paths=runtime_diff.new_paths,
+                net_alerts=net_capture.alerts,
+            )
 
         except Exception as exc:  # pylint: disable=broad-exception-caught
             log(f"Этап 2 завершился ошибкой: {exc}")
@@ -577,6 +581,121 @@ class Stage2DynamicRunner:
         except Exception as exc:  # pylint: disable=broad-exception-caught
             log(f"Не удалось получить снимок appops: {exc}")
         return ""
+
+    def _load_stage1_findings(self, run_dir: Path, log: Callable) -> tuple[list[dict], str]:
+        """Load findings from the most recent Stage1 run for the same project."""
+        try:
+            project_dir = run_dir.parent.parent.parent
+            candidates = sorted(project_dir.rglob("findings/findings.json"), reverse=True)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            log(f"Не удалось найти Stage1 findings для корреляции: {exc}")
+            return [], ""
+
+        for path in candidates:
+            if "stage1_static" not in str(path):
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                log(f"Не удалось прочитать Stage1 findings ({path}): {exc}")
+                continue
+            if isinstance(payload, list):
+                log(f"Для корреляции используются Stage1 findings: {path}")
+                return payload, str(path)
+        return [], ""
+
+    def _read_appops_allowed_ops(self, appops_path: str) -> set[str]:
+        if not appops_path:
+            return set()
+        try:
+            text = Path(appops_path).read_text(encoding="utf-8", errors="replace")
+        except Exception:  # pylint: disable=broad-exception-caught
+            return set()
+
+        allowed_ops: set[str] = set()
+        for line in text.splitlines():
+            stripped = line.strip()
+            if ":" not in stripped:
+                continue
+            op_name, state = stripped.split(":", 1)
+            if state.split(";", 1)[0].strip().lower() == "allow":
+                allowed_ops.add(op_name.strip())
+        return allowed_ops
+
+    def _correlate_with_stage1(
+        self,
+        stage1_findings: list[dict],
+        stage1_findings_path: str,
+        appops_path: str,
+        runtime_new_paths: list[str],
+        net_alerts: list[dict],
+    ) -> dict:
+        """Correlate a limited set of Stage1 findings with existing Stage2 evidence."""
+        correlation = {
+            "source_stage1_findings_path": stage1_findings_path,
+            "confirmed_indicators": [],
+            "unconfirmed_indicators": [],
+        }
+        if not stage1_findings:
+            return correlation
+
+        allowed_ops = self._read_appops_allowed_ops(appops_path)
+        runtime_paths = [path.lower() for path in runtime_new_paths]
+        alert_ids = {
+            str(alert.get("rule_id", "")).strip()
+            for alert in net_alerts
+            if isinstance(alert, dict)
+        }
+
+        unique_stage1_categories: list[str] = []
+        seen_categories: set[str] = set()
+        for finding in stage1_findings:
+            if not isinstance(finding, dict):
+                continue
+            category = str(finding.get("category") or "").strip()
+            if not category or category in seen_categories:
+                continue
+            seen_categories.add(category)
+            unique_stage1_categories.append(category)
+
+        rules = {
+            "ndv_accessibility_surveillance": (
+                lambda: "BIND_ACCESSIBILITY_SERVICE" in allowed_ops,
+                "appops:BIND_ACCESSIBILITY_SERVICE=allow",
+            ),
+            "ndv_overlay_abuse": (
+                lambda: "SYSTEM_ALERT_WINDOW" in allowed_ops,
+                "appops:SYSTEM_ALERT_WINDOW=allow",
+            ),
+            "ndv_dynamic_code_loading_dex": (
+                lambda: any(
+                    path.endswith((".dex", ".jar", ".odex", ".vdex")) or ".dex" in path
+                    for path in runtime_paths
+                ),
+                "runtime_diff:new_paths содержит DEX/JAR/ODEX",
+            ),
+            "sec_cleartext_http_endpoint": (
+                lambda: "sec_runtime_cleartext_transport" in alert_ids,
+                "network_alert:sec_runtime_cleartext_transport",
+            ),
+            "sec_cleartext_http_protocol": (
+                lambda: "sec_runtime_cleartext_transport" in alert_ids,
+                "network_alert:sec_runtime_cleartext_transport",
+            ),
+        }
+
+        for category in unique_stage1_categories:
+            rule = rules.get(category)
+            if rule is None:
+                continue
+            predicate, evidence = rule
+            target_key = "confirmed_indicators" if predicate() else "unconfirmed_indicators"
+            correlation[target_key].append({
+                "category": category,
+                "evidence": evidence,
+            })
+
+        return correlation
 
     def _detect_crash(self, logcat_path: str, pkg_name: str) -> dict:
         """Scan full logcat for FATAL EXCEPTION in target package."""
