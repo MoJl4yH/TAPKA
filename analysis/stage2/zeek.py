@@ -117,7 +117,7 @@ class ZeekAnalyzer:
         out_dir.mkdir(parents=True, exist_ok=True)
 
         if not pcap_path.exists():
-            self._log("pcap not found, skipping network analysis.")
+            self._log("PCAP не найден, сетевой анализ пропущен.")
             return capture
 
         if shutil.which("zeek"):
@@ -126,9 +126,9 @@ class ZeekAnalyzer:
             self._analyze_with_tshark(pcap_path, out_dir, capture, capture_duration_sec)
         else:
             self._log(
-                "Neither Zeek nor tshark installed. "
-                "pcap saved for manual review. "
-                "Install: sudo apt install tshark"
+                "Zeek и tshark не установлены. "
+                "PCAP сохранён для ручной проверки. "
+                "Установка: sudo apt install tshark"
             )
             capture.zeek_available = False
 
@@ -141,7 +141,7 @@ class ZeekAnalyzer:
     def _analyze_with_zeek(
         self, pcap_path: Path, out_dir: Path, capture: Stage2NetworkCapture
     ) -> None:
-        self._log(f"Running Zeek on {pcap_path}...")
+        self._log(f"Запуск Zeek для {pcap_path}...")
         zeek_bin = shutil.which("zeek")
         code, _, stderr = run_command_capture(
             [zeek_bin, "-r", str(pcap_path)],  # type: ignore[list-item]
@@ -149,7 +149,7 @@ class ZeekAnalyzer:
             timeout=120,
         )
         if code != 0:
-            self._log(f"Zeek exit_code={code}: {stderr.strip()[:200]}")
+            self._log(f"Zeek завершился с кодом {code}: {stderr.strip()[:200]}")
 
         capture.zeek_available = True
 
@@ -195,7 +195,7 @@ class ZeekAnalyzer:
             capture.top_hosts = list(dict.fromkeys(hosts))[:10]
 
         self._log(
-            f"Zeek done: {capture.unique_ips} IPs, {capture.unique_domains} domains."
+            f"Zeek завершён: {capture.unique_ips} IP, {capture.unique_domains} доменов."
         )
 
     # ------------------------------------------------------------------
@@ -209,7 +209,7 @@ class ZeekAnalyzer:
         capture: Stage2NetworkCapture,
         capture_duration_sec: float = 0.0,
     ) -> None:
-        self._log(f"Running tshark on {pcap_path}...")
+        self._log(f"Запуск tshark для {pcap_path}...")
         capture.zeek_available = True  # analysis ran, just with tshark
 
         # --- Unique IPs (src + dst) ---
@@ -266,8 +266,8 @@ class ZeekAnalyzer:
                 capture.top_hosts = (capture.top_hosts + extra)[:10]
 
         self._log(
-            f"tshark done: {capture.unique_ips} IPs, {capture.unique_domains} domains, "
-            f"{len(capture.top_hosts)} hosts."
+            f"tshark завершён: {capture.unique_ips} IP, {capture.unique_domains} доменов, "
+            f"{len(capture.top_hosts)} узлов."
         )
 
         # --- Structured TSV exports for alert pipeline ---
@@ -283,9 +283,9 @@ class ZeekAnalyzer:
                 encoding="utf-8",
             )
             capture.zeek_logs["tshark_alerts.json"] = str(alerts_path)
-            self._log(f"tshark alerts: {len(alerts)} rule(s) triggered.")
+            self._log(f"Предупреждения tshark: сработало правил — {len(alerts)}.")
         else:
-            self._log("tshark alerts: no rules triggered.")
+            self._log("Предупреждения tshark: правила не сработали.")
 
     def _export_tshark_tsvs(
         self, pcap_path: Path, out_dir: Path, capture: Stage2NetworkCapture
@@ -387,16 +387,16 @@ class ZeekAnalyzer:
         return [{
             "rule_id": "info_firebase_fcm_usage",
             "confidence": "C1",
-            "title": "App connected to Firebase/FCM infrastructure",
+            "title": "Обнаружено подключение к инфраструктуре Firebase/FCM",
             "detail": (
-                f"Observed FCM/Firebase DNS queries: {', '.join(sorted(found))}. "
-                "Firebase is dual-use infrastructure: common in legitimate apps "
-                "AND used as covert C2 relay by malware. "
-                "Analyst review required before escalating."
+                f"Обнаружены DNS-запросы к FCM/Firebase: {', '.join(sorted(found))}. "
+                "Firebase — инфраструктура двойного назначения: она часто встречается в легитимных приложениях "
+                "и одновременно может использоваться вредоносным ПО как скрытый ретранслятор C2. "
+                "Перед повышением критичности требуется проверка аналитика."
             ),
             "evidence": "tshark_dns_detailed.tsv",
-            "suppression_checks": ["attribution_ambient_only: not checked (no UID correlation yet)"],
-            "analyst_note": "Elevate to C2 only when app UID is directly correlated to FCM flow.",
+            "suppression_checks": ["проверка_атрибуции_по_окружению: не выполнена (пока нет корреляции по UID)"],
+            "analyst_note": "Повышайте уровень до C2 только при прямой корреляции потока FCM с UID приложения.",
         }]
 
     def _rule_cleartext_transport(self, http_rows: list[list[str]]) -> list[dict]:
@@ -423,9 +423,9 @@ class ZeekAnalyzer:
 
             trigger_reason = ""
             if auth_header and auth_header.lower().split(":")[0].strip() in _HTTP_AUTH_HEADERS:
-                trigger_reason = f"Auth header present: {auth_header[:60]}"
+                trigger_reason = f"Присутствует заголовок авторизации: {auth_header[:60]}"
             elif any(pat in uri.lower() for pat in _HTTP_AUTH_URI_PATTERNS):
-                trigger_reason = f"Sensitive URI: {uri[:100]}"
+                trigger_reason = f"Чувствительный URI: {uri[:100]}"
 
             if trigger_reason:
                 hits.append({"host": host, "uri": uri, "reason": trigger_reason})
@@ -435,17 +435,17 @@ class ZeekAnalyzer:
         return [{
             "rule_id": "sec_runtime_cleartext_transport",
             "confidence": "C2",
-            "title": "Cleartext HTTP with auth/session patterns detected",
+            "title": "Обнаружен открытый HTTP с признаками аутентификации или сессии",
             "detail": (
-                f"Found {len(hits)} HTTP request(s) with auth/session indicators over cleartext. "
-                f"First: host={hits[0]['host']}, uri={hits[0]['uri']}. "
-                f"Reason: {hits[0]['reason']}"
+                f"Обнаружено {len(hits)} HTTP-запросов с индикаторами аутентификации/сессии без шифрования. "
+                f"Первый пример: host={hits[0]['host']}, uri={hits[0]['uri']}. "
+                f"Причина: {hits[0]['reason']}"
             ),
             "evidence": "tshark_http_detailed.tsv",
             "suppression_checks": [
-                "loopback_excluded: true",
-                "platform_allowlist_checked: true",
-                "connectivity_check_uris_excluded: true",
+                "loopback_исключён: да",
+                "разрешённый_список_платформ_проверен: да",
+                "URI_проверки_доступности_исключены: да",
             ],
         }]
 
@@ -490,16 +490,16 @@ class ZeekAnalyzer:
             alerts.append({
                 "rule_id": "anomaly_dns_tunneling_suspected",
                 "confidence": "C2",
-                "title": "DNS tunneling pattern suspected (long high-entropy labels)",
+                "title": "Подозрение на DNS-туннелирование (длинные метки с высокой энтропией)",
                 "detail": (
-                    f"Found {len(long_entropy_hits)} DNS queries with labels >50 chars "
-                    f"and Shannon entropy >3.5 bits/char. "
-                    f"Examples: {', '.join(long_entropy_hits[:3])}"
+                    f"Обнаружено {len(long_entropy_hits)} DNS-запросов с метками длиной более 50 символов "
+                    f"и энтропией Шеннона >3.5 бит/символ. "
+                    f"Примеры: {', '.join(long_entropy_hits[:3])}"
                 ),
                 "evidence": "tshark_dns_detailed.tsv",
                 "suppression_checks": [
-                    "mdns_excluded: true",
-                    "min_3_queries_required: true",
+                    "mDNS_исключён: да",
+                    "минимум_3_запроса_требуется: да",
                 ],
             })
 
@@ -507,15 +507,15 @@ class ZeekAnalyzer:
             alerts.append({
                 "rule_id": "anomaly_dns_tunneling_suspected",
                 "confidence": "C2",
-                "title": "DNS tunneling pattern suspected (high TXT query ratio)",
+                "title": "Подозрение на DNS-туннелирование (высокая доля TXT-запросов)",
                 "detail": (
-                    f"TXT queries: {txt_count}/{non_mdns_count} "
-                    f"({txt_count / non_mdns_count:.0%} of non-mDNS queries > 20% threshold)."
+                    f"TXT-запросы: {txt_count}/{non_mdns_count} "
+                    f"({txt_count / non_mdns_count:.0%} от не-mDNS-запросов, что выше порога 20%)."
                 ),
                 "evidence": "tshark_dns_detailed.tsv",
                 "suppression_checks": [
-                    "mdns_excluded: true",
-                    "min_3_txt_queries_required: true",
+                    "mDNS_исключён: да",
+                    "минимум_3_TXT_запроса_требуется: да",
                 ],
             })
 
@@ -552,7 +552,7 @@ class ZeekAnalyzer:
 
             if weak_ver or weak_cipher:
                 sni = row[3].strip() or row[2].strip()
-                detail = f"sni={sni}, version={tls_version}, cipher={cipher}"
+                detail = f"SNI={sni}, версия={tls_version}, шифр={cipher}"
                 hits.append(detail)
 
         if not hits:
@@ -560,14 +560,14 @@ class ZeekAnalyzer:
         return [{
             "rule_id": "sec_runtime_tls_weakness",
             "confidence": "C3",
-            "title": "Obsolete TLS version or weak cipher suite observed",
+            "title": "Обнаружена устаревшая версия TLS или слабый набор шифров",
             "detail": (
-                f"Found {len(hits)} TLS handshake(s) with weak parameters. "
-                f"First: {hits[0]}"
+                f"Обнаружено {len(hits)} TLS-рукопожатий со слабыми параметрами. "
+                f"Первый пример: {hits[0]}"
             ),
             "evidence": "tshark_tls_detailed.tsv",
-            "suppression_checks": ["system_uid_traffic: not filtered (no UID attribution)"],
-            "analyst_note": "Near-zero FP on Android API 35+. High confidence when triggered.",
+            "suppression_checks": ["трафик_system_uid: не отфильтрован (нет атрибуции по UID)"],
+            "analyst_note": "Для Android API 35+ вероятность ложного срабатывания близка к нулю. При срабатывании доверие высокое.",
         }]
 
     def _rule_data_exfiltration(
@@ -632,19 +632,19 @@ class ZeekAnalyzer:
         return [{
             "rule_id": "ndv_data_exfiltration_suspected",
             "confidence": "C2",
-            "title": f"Large outbound data to non-platform host ({hits[0]['bytes'] // 1024} KB)",
+            "title": f"Большой исходящий объём данных на неплатформенный узел ({hits[0]['bytes'] // 1024} КБ)",
             "detail": (
-                f"Found {len(hits)} non-platform, non-CDN destination(s) with >50 KB outbound. "
-                f"Largest: {hits[0]['hostname']} ({hits[0]['bytes'] // 1024} KB). "
-                "Note: no app-UID correlation available; may include system traffic."
+                f"Обнаружено {len(hits)} неплатформенных и не-CDN узлов с исходящим объёмом более 50 КБ. "
+                f"Наибольший объём: {hits[0]['hostname']} ({hits[0]['bytes'] // 1024} КБ). "
+                "Примечание: атрибуция по UID приложения отсутствует, поэтому возможен системный трафик."
             ),
             "evidence": "tshark_flows.tsv",
             "suppression_checks": [
-                "cdn_allowlist_applied: true",
-                "platform_allowlist_applied: true",
-                "threshold_50kb: true",
+                "разрешённый_список_CDN_применён: да",
+                "разрешённый_список_платформ_применён: да",
+                "порог_50КБ: да",
             ],
-            "analyst_note": "Verify attribution: filter by app UID in /proc/<pid>/net/tcp for confirmation.",
+            "analyst_note": "Проверьте атрибуцию: для подтверждения отфильтруйте соединения по UID приложения в /proc/<pid>/net/tcp.",
         }]
 
     def _rule_beacon_window_gate(self, capture_duration_sec: float) -> list[dict]:
@@ -653,13 +653,13 @@ class ZeekAnalyzer:
             return [{
                 "rule_id": "info_beacon_detection_suppressed",
                 "confidence": "C1",
-                "title": f"Beacon detection suppressed (capture window {capture_duration_sec:.0f}s < 120s minimum)",
+                "title": f"Детектирование beacon-паттерна отключено (окно захвата {capture_duration_sec:.0f} с < минимум 120 с)",
                 "detail": (
-                    "Statistical beacon detection requires ≥5 connection samples with mean interval >30s, "
-                    "which needs a minimum capture window of ~150s. "
-                    "Run with deep profile (extended capture) to enable beacon analysis."
+                    "Статистическое детектирование beacon-паттерна требует не менее 5 соединений со средним интервалом более 30 с, "
+                    "что требует минимального окна захвата около 150 с. "
+                    "Запустите расширенный профиль с более длинным захватом, чтобы включить анализ beacon-паттерна."
                 ),
                 "evidence": "",
-                "suppression_checks": ["beacon_window_gate: capture too short for statistical analysis"],
+                "suppression_checks": ["ограничение_окна_beacon: захват слишком короткий для статистического анализа"],
             }]
         return []

@@ -36,9 +36,9 @@ def prepare_stage3_run(
 
 def ensure_apk_ready(apk_path: Path) -> None:
     if not apk_path.exists():
-        raise RuntimeError(f"APK not found: {apk_path}")
+        raise RuntimeError(f"APK не найден: {apk_path}")
     if apk_path.stat().st_size == 0:
-        raise RuntimeError(f"APK is empty: {apk_path}")
+        raise RuntimeError(f"APK пуст: {apk_path}")
 
 
 def build_stage3_logger(

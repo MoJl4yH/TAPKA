@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
 )
 
+from analysis.localization import translate_status
 from analysis.stage1_analysis import Stage1StaticRunner
 from analysis.reporting import ReportManager
 from analysis.stages import STAGE_STATIC
@@ -46,14 +47,14 @@ class Stage1Worker(QThread):
 
 class ProjectWindow(QWidget):
     TOOL_STATUS_DEFS = [
-        ("apksigner", "APK signature"),
-        ("aapt2", "Manifest (aapt2)"),
-        ("keytool", "Certificates"),
-        ("apktool", "Resources (apktool)"),
-        ("jadx", "Decompile (jadx)"),
-        ("rg", "Pattern scan (rg)"),
-        ("strings", "Native strings"),
-        ("yara", "YARA scan"),
+        ("apksigner", "Подпись APK"),
+        ("aapt2", "Манифест (aapt2)"),
+        ("keytool", "Сертификаты"),
+        ("apktool", "Ресурсы (apktool)"),
+        ("jadx", "Декомпиляция (jadx)"),
+        ("rg", "Сканирование шаблонов (rg)"),
+        ("strings", "Строки нативных библиотек"),
+        ("yara", "YARA-сканирование"),
     ]
     ALLOWED_NONZERO_RETURN = {"rg": {1}}
     JADX_PARTIAL_PATTERN = re.compile(r"finished with errors", re.IGNORECASE)
@@ -68,7 +69,7 @@ class ProjectWindow(QWidget):
         self.tool_status_labels: dict[str, QPushButton] = {}
         self._analysis_timer: QTimer | None = None
         self._analysis_start_ts: float | None = None
-        self._analysis_message = "Starting analysis"
+        self._analysis_message = "Запуск анализа"
         self._analysis_step_text = "0/0"
         self.title_label: QLabel | None = None
         self.subtitle_label: QLabel | None = None
@@ -83,7 +84,7 @@ class ProjectWindow(QWidget):
         self.open_logs_button: QPushButton | None = None
         self.open_report_button: QPushButton | None = None
 
-        self.setWindowTitle(f"Project: {project.project_id}")
+        self.setWindowTitle(f"Проект: {project.project_id}")
         self.setMinimumSize(600, 320)
         self.setObjectName("ProjectWindow")
         self.setStyleSheet(APP_STYLE)
@@ -105,7 +106,7 @@ class ProjectWindow(QWidget):
     def _build_header(self, layout: QVBoxLayout) -> None:
         header_row = QHBoxLayout()
         title_box = QVBoxLayout()
-        self.title_label = QLabel("Project Overview")
+        self.title_label = QLabel("Обзор проекта")
         self.title_label.setObjectName("titleLabel")
         self.subtitle_label = QLabel(self.project.project_id)
         self.subtitle_label.setObjectName("subtitleLabel")
@@ -113,7 +114,7 @@ class ProjectWindow(QWidget):
         title_box.addWidget(self.subtitle_label)
         header_row.addLayout(title_box)
 
-        self.status_label = QLabel("Idle")
+        self.status_label = QLabel("Ожидание")
         self.status_label.setObjectName("statusBadge")
         header_row.addStretch()
         header_row.addWidget(self.status_label, alignment=Qt.AlignTop)
@@ -126,17 +127,17 @@ class ProjectWindow(QWidget):
         details_layout.setContentsMargins(16, 16, 16, 16)
         details_layout.setSpacing(10)
 
-        details_header = QLabel("APK Info")
+        details_header = QLabel("Сведения об APK")
         details_header.setObjectName("sectionLabel")
         details_layout.addWidget(details_header)
 
         form = QFormLayout()
         self.apk_name_label = QLabel(self.project.apk_meta.name)
         self.sha_label = QLabel(self.project.apk_meta.sha256)
-        self.size_label = QLabel(f"{self.project.apk_meta.size} bytes")
-        form.addRow("APK Name:", self.apk_name_label)
+        self.size_label = QLabel(f"{self.project.apk_meta.size} байт")
+        form.addRow("Имя APK:", self.apk_name_label)
         form.addRow("SHA256:", self.sha_label)
-        form.addRow("Size:", self.size_label)
+        form.addRow("Размер:", self.size_label)
         details_layout.addLayout(form)
         layout.addWidget(details_card)
 
@@ -147,16 +148,16 @@ class ProjectWindow(QWidget):
         stage_layout.setContentsMargins(16, 16, 16, 16)
         stage_layout.setSpacing(10)
 
-        stage_header = QLabel("Stage 1 (Static)")
+        stage_header = QLabel("Этап 1 — статический анализ")
         stage_header.setObjectName("sectionLabel")
         stage_layout.addWidget(stage_header)
 
-        stage_hint = QLabel("Runs local tools and stores logs, artifacts, and a report.")
+        stage_hint = QLabel("Запускает локальные инструменты и сохраняет журналы, артефакты и отчёт.")
         stage_hint.setObjectName("subtitleLabel")
         stage_hint.setWordWrap(True)
         stage_layout.addWidget(stage_hint)
 
-        self.progress_label = QLabel("Waiting to start.")
+        self.progress_label = QLabel("Ожидание запуска.")
         self.progress_label.setObjectName("subtitleLabel")
         stage_layout.addWidget(self.progress_label)
 
@@ -166,13 +167,13 @@ class ProjectWindow(QWidget):
         self.progress_bar.setValue(0)
         stage_layout.addWidget(self.progress_bar)
 
-        status_header = QLabel("Analysis status")
+        status_header = QLabel("Статус анализа")
         status_header.setObjectName("sectionLabel")
         stage_layout.addWidget(status_header)
 
         status_layout = QFormLayout()
         for tool, label in self.TOOL_STATUS_DEFS:
-            status_label = QPushButton("Not run")
+            status_label = QPushButton("Не запускалось")
             status_label.setObjectName("toolStatus")
             status_label.setProperty("status", "pending")
             status_label.setFlat(True)
@@ -183,7 +184,7 @@ class ProjectWindow(QWidget):
         stage_layout.addLayout(status_layout)
 
         stage_row = QHBoxLayout()
-        self.run_button = QPushButton("Run Stage 1 (Static)")
+        self.run_button = QPushButton("Запустить этап 1")
         self.run_button.setObjectName("primaryButton")
         self.run_button.clicked.connect(self.run_stage1)
         stage_row.addWidget(self.run_button)
@@ -198,20 +199,20 @@ class ProjectWindow(QWidget):
         open_layout.setContentsMargins(16, 16, 16, 16)
         open_layout.setSpacing(10)
 
-        open_header = QLabel("Open Outputs")
+        open_header = QLabel("Открыть результаты")
         open_header.setObjectName("sectionLabel")
         open_layout.addWidget(open_header)
 
         button_row = QHBoxLayout()
-        self.open_artifacts_button = QPushButton("Open artifacts")
+        self.open_artifacts_button = QPushButton("Открыть артефакты")
         self.open_artifacts_button.clicked.connect(self.open_artifacts)
         button_row.addWidget(self.open_artifacts_button)
 
-        self.open_logs_button = QPushButton("Open logs")
+        self.open_logs_button = QPushButton("Открыть журналы")
         self.open_logs_button.clicked.connect(self.open_logs)
         button_row.addWidget(self.open_logs_button)
 
-        self.open_report_button = QPushButton("Open report")
+        self.open_report_button = QPushButton("Открыть отчёт")
         self.open_report_button.clicked.connect(self.open_report)
         button_row.addWidget(self.open_report_button)
 
@@ -227,10 +228,10 @@ class ProjectWindow(QWidget):
     def _load_latest_run(self) -> None:
         latest = self.storage.get_latest_run(self.project.project_id)
         if not latest:
-            self.status_label.setText("Idle")
+            self.status_label.setText("Ожидание")
             return
         self.current_run, self.current_run_dir = latest
-        self.status_label.setText(f"{self.current_run.status}")
+        self.status_label.setText(translate_status(self.current_run.status))
         self._update_tool_statuses(self.current_run)
 
     def _update_open_buttons(self) -> None:
@@ -243,12 +244,12 @@ class ProjectWindow(QWidget):
         if self.worker and self.worker.isRunning():
             return
         self._analysis_start_ts = time.monotonic()
-        self._analysis_message = "Starting Stage 1..."
+        self._analysis_message = "Запуск этапа 1..."
         self._analysis_step_text = "0/0"
         if self._analysis_timer:
             self._analysis_timer.start()
-        self.status_label.setText("Running")
-        self.progress_label.setText("Starting Stage 1...")
+        self.status_label.setText("Выполняется")
+        self.progress_label.setText("Запуск этапа 1...")
         self.progress_bar.setMaximum(1)
         self.progress_bar.setValue(0)
         self.run_button.setEnabled(False)
@@ -270,8 +271,8 @@ class ProjectWindow(QWidget):
         self._analysis_start_ts = None
         self.current_run = run
         self.current_run_dir = self.storage.get_run_dir(self.project.project_id, run.run_id)
-        self.status_label.setText(f"{run.status}")
-        self.progress_label.setText("Stage 1 completed.")
+        self.status_label.setText(translate_status(run.status))
+        self.progress_label.setText("Этап 1 завершён.")
         self.progress_bar.setValue(self.progress_bar.maximum())
         self._update_open_buttons()
         self._update_tool_statuses(run)
@@ -283,15 +284,15 @@ class ProjectWindow(QWidget):
         self._analysis_start_ts = None
         self._load_latest_run()
         self._update_open_buttons()
-        self.status_label.setText("Error")
-        self.progress_label.setText("Stage 1 failed. Check logs.")
+        self.status_label.setText("Ошибка")
+        self.progress_label.setText("Этап 1 завершился ошибкой. Проверьте журналы.")
         self._update_tool_statuses(self.current_run)
-        QMessageBox.warning(self, "Stage 1 Failed", message)
+        QMessageBox.warning(self, "Ошибка этапа 1", message)
 
     def _on_progress(self, payload: dict) -> None:
         completed = int(payload.get("completed", 0))
         total = int(payload.get("total", 0)) or 1
-        message = payload.get("message", "Running...")
+        message = payload.get("message", "Выполняется...")
         elapsed_sec = payload.get("elapsed_sec")
 
         self.progress_bar.setMaximum(max(total, 1))
@@ -304,7 +305,7 @@ class ProjectWindow(QWidget):
             self.progress_label.setText(f"{message} · {step_text}")
         else:
             self.progress_label.setText(
-                f"{message} · {step_text} · Elapsed {self._format_duration(elapsed_sec)}"
+                f"{message} · {step_text} · Прошло {self._format_duration(elapsed_sec)}"
             )
 
     def _tick_analysis_timer(self) -> None:
@@ -313,7 +314,7 @@ class ProjectWindow(QWidget):
         elapsed = time.monotonic() - self._analysis_start_ts
         self.progress_label.setText(
             f"{self._analysis_message} · {self._analysis_step_text} · "
-            f"Elapsed {self._format_duration(elapsed)}"
+            f"Прошло {self._format_duration(elapsed)}"
         )
 
     def _set_tool_status(self, tool: str, status: str, text: str | None = None) -> None:
@@ -321,13 +322,13 @@ class ProjectWindow(QWidget):
         if not label:
             return
         text_map = {
-            "ok": "OK",
-            "fail": "FAIL",
-            "running": "Running",
-            "partial": "PARTIAL",
-            "pending": "Not run",
-            "skipped": "Skipped",
-            "unknown": "Unknown",
+            "ok": "ОК",
+            "fail": "Ошибка",
+            "running": "Выполняется",
+            "partial": "Частично",
+            "pending": "Не запускалось",
+            "skipped": "Пропущено",
+            "unknown": "Неизвестно",
         }
         label.setText(text or text_map.get(status, status))
         label.setProperty("status", status)
@@ -410,8 +411,8 @@ class ProjectWindow(QWidget):
     def _format_duration(seconds: int) -> str:
         minutes, secs = divmod(max(0, int(seconds)), 60)
         if minutes:
-            return f"{minutes}m {secs}s"
-        return f"{secs}s"
+            return f"{minutes} мин {secs} с"
+        return f"{secs} с"
 
     def open_artifacts(self) -> None:
         if not self.current_run_dir:
@@ -429,6 +430,6 @@ class ProjectWindow(QWidget):
         report_manager = ReportManager(self.storage)
         _, report_path = report_manager.report_paths(self.current_run_dir, STAGE_STATIC)
         if not report_path.exists():
-            QMessageBox.information(self, "Report", "Report not found.")
+            QMessageBox.information(self, "Отчёт", "Отчёт не найден.")
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(report_path)))

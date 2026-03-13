@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Callable
 
 from analysis.apkid.runner import ApkidConfig, ApkidRunner
+from analysis.runtime.clock import now_utc_iso
 from analysis.normalize.stage3 import normalize_stage3
 from analysis.reporting import ReportManager
 from analysis.runtime.context import RunContext
@@ -46,8 +46,8 @@ class Stage3ApkidRunner:
         ctx, run_dir, apk_path, run = prepare_stage3_run(self.storage, project_id, ctx)
         log = build_stage3_logger(run_dir / "logs" / "stage3_apkid.txt", self.on_progress)
 
-        log("Stage3 APKiD run started.")
-        emit_progress(self.on_progress, "Starting APKiD Stage3 analysis...")
+        log("Запущен анализ APKiD на этапе 3.")
+        emit_progress(self.on_progress, "Запуск анализа APKiD для этапа 3...")
         try:
             ensure_apk_ready(apk_path)
             config = ApkidConfig(
@@ -63,20 +63,20 @@ class Stage3ApkidRunner:
             tool_ok, exit_code = read_tool_ok(tool_result_path)
             if not tool_ok:
                 suffix = f" (exit_code={exit_code})" if exit_code is not None else ""
-                raise RuntimeError(f"APKiD analysis failed{suffix}.")
+                raise RuntimeError(f"Анализ APKiD завершился ошибкой{suffix}.")
 
             run.status = "Done"
-            run.finished_at = datetime.now().isoformat(timespec="seconds")
+            run.finished_at = now_utc_iso()
             report_manager = ReportManager(self.storage)
             _, html_path = report_manager.generate_stage3(run, run_dir, None, None)
             run.report_path = str(html_path)
-            log("Stage3 APKiD run completed.")
+            log("Анализ APKiD на этапе 3 завершён.")
             return run
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            log(f"Stage3 APKiD run failed: {exc}")
+            log(f"Анализ APKiD на этапе 3 завершился ошибкой: {exc}")
             run.status = "Error"
-            run.finished_at = datetime.now().isoformat(timespec="seconds")
-            append_run_error(run, f"Stage3 APKiD failed: {exc}")
+            run.finished_at = now_utc_iso()
+            append_run_error(run, f"APKiD на этапе 3 завершился ошибкой: {exc}")
             report_manager = ReportManager(self.storage)
             report_manager.generate_stage3(run, run_dir, None, None)
             raise

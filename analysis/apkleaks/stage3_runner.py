@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
 from analysis.apkleaks.runner import ApkleaksConfig, ApkleaksRunner
+from analysis.runtime.clock import now_utc_iso
 from analysis.normalize.stage3 import normalize_stage3
 from analysis.reporting import ReportManager
 from analysis.runtime.context import RunContext
@@ -45,8 +45,8 @@ class Stage3ApkleaksRunner:
         ctx, run_dir, apk_path, run = prepare_stage3_run(self.storage, project_id, ctx)
         log = build_stage3_logger(run_dir / "logs" / "stage3_apkleaks.txt", self.on_progress)
 
-        log("Stage3 APKLeaks run started.")
-        emit_progress(self.on_progress, "Starting APKLeaks Stage3 analysis...")
+        log("Запущен анализ APKLeaks на этапе 3.")
+        emit_progress(self.on_progress, "Запуск анализа APKLeaks для этапа 3...")
         try:
             ensure_apk_ready(apk_path)
             config = ApkleaksConfig(
@@ -62,20 +62,20 @@ class Stage3ApkleaksRunner:
             tool_ok, exit_code = read_tool_ok(tool_result_path)
             if not tool_ok:
                 suffix = f" (exit_code={exit_code})" if exit_code is not None else ""
-                raise RuntimeError(f"APKLeaks analysis failed{suffix}.")
+                raise RuntimeError(f"Анализ APKLeaks завершился ошибкой{suffix}.")
 
             run.status = "Done"
-            run.finished_at = datetime.now().isoformat(timespec="seconds")
+            run.finished_at = now_utc_iso()
             report_manager = ReportManager(self.storage)
             _, html_path = report_manager.generate_stage3(run, run_dir, None, None)
             run.report_path = str(html_path)
-            log("Stage3 APKLeaks run completed.")
+            log("Анализ APKLeaks на этапе 3 завершён.")
             return run
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            log(f"Stage3 APKLeaks run failed: {exc}")
+            log(f"Анализ APKLeaks на этапе 3 завершился ошибкой: {exc}")
             run.status = "Error"
-            run.finished_at = datetime.now().isoformat(timespec="seconds")
-            append_run_error(run, f"Stage3 APKLeaks failed: {exc}")
+            run.finished_at = now_utc_iso()
+            append_run_error(run, f"APKLeaks на этапе 3 завершился ошибкой: {exc}")
             report_manager = ReportManager(self.storage)
             report_manager.generate_stage3(run, run_dir, None, None)
             raise

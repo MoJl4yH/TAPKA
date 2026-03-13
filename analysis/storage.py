@@ -3,7 +3,7 @@ import json
 import os
 import re
 import shutil
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from analysis.runtime.clock import now_utc_iso
@@ -21,7 +21,7 @@ class Storage:
         path.mkdir(parents=True, exist_ok=True)
 
     def _now(self) -> str:
-        return datetime.now().isoformat(timespec="seconds")
+        return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     def list_projects(self) -> list[Project]:
         projects = []
@@ -318,12 +318,8 @@ class Storage:
         version_dir = self.get_active_version_dir(project_id)
         runs_dir = version_dir / "runs"
         self._ensure_dir(runs_dir)
-        suffix = f"_{STAGE_CROSS_TOOL}"
-        run_dirs = [path for path in runs_dir.iterdir() if path.is_dir() and path.name.endswith(suffix)]
-        run_dirs.sort(key=lambda path: path.name, reverse=True)
         apk_path = self.get_apk_path(project_id)
-        if run_dirs:
-            return RunContext.from_run_dir(project_dir, apk_path, "stage3", run_dirs[0])
+        # Always create a fresh run dir for Stage3 — each cross-tool run is independent.
         run_id = self.generate_run_id(STAGE_CROSS_TOOL)
         run_dir = runs_dir / run_id
         return RunContext(

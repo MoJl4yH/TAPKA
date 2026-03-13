@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import tarfile
 from pathlib import Path
@@ -34,6 +35,11 @@ class SnapshotDiff:
         if snap_a.fs_tar_path and snap_b.fs_tar_path:
             fs_diff_path = out_dir / f"diff_fs_{snap_a.tag}_vs_{snap_b.tag}.txt"
             self._log(f"Computing filesystem diff ({snap_a.tag} → {snap_b.tag})...")
+            # Compare tar members directly (avoids diff -ru "Only in..." parsing issue)
+            members_a = self._get_tar_members(snap_a.fs_tar_path)
+            members_b = self._get_tar_members(snap_b.fs_tar_path)
+            result.new_paths = sorted(members_b - members_a)[:100]
+            # Also produce text diff artifact for human review
             dir_a = out_dir / f"fs_{snap_a.tag}"
             dir_b = out_dir / f"fs_{snap_b.tag}"
             self._extract_tar(snap_a.fs_tar_path, dir_a)
@@ -41,7 +47,6 @@ class SnapshotDiff:
             diff_out = self._run_diff_dirs(str(dir_a), str(dir_b))
             fs_diff_path.write_text(diff_out, encoding="utf-8")
             result.fs_diff_path = str(fs_diff_path)
-            result.new_paths = self._parse_new_paths(diff_out)
 
         return result
 
@@ -66,13 +71,32 @@ class SnapshotDiff:
         except Exception as exc:  # pylint: disable=broad-exception-caught
             return f"# diff error: {exc}\n"
 
+    def _safe_extract(self, tar: tarfile.TarFile, out_dir: Path) -> None:
+        resolved_out = out_dir.resolve()
+        for member in tar.getmembers():
+            if member.issym() or member.islnk() or member.isdev():
+                self._log(f"Skipping unsafe tar member: {member.name}")
+                continue
+            member_path = (out_dir / member.name).resolve()
+            if not str(member_path).startswith(str(resolved_out) + os.sep) and member_path != resolved_out:
+                self._log(f"Skipping path-traversal tar member: {member.name}")
+                continue
+            tar.extract(member, path=str(out_dir))  # noqa: S202
+
     def _extract_tar(self, tar_path: str, out_dir: Path) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
         try:
             with tarfile.open(tar_path, "r:*") as tar:
-                tar.extractall(path=str(out_dir))  # noqa: S202
+                self._safe_extract(tar, out_dir)
         except Exception as exc:  # pylint: disable=broad-exception-caught
             self._log(f"tar extract warning ({tar_path}): {exc}")
+
+    def _get_tar_members(self, tar_path: str) -> set[str]:
+        try:
+            with tarfile.open(tar_path, "r:*") as tar:
+                return {m.name for m in tar.getmembers()}
+        except Exception:  # pylint: disable=broad-exception-caught
+            return set()
 
     def _parse_new_packages(self, diff_out: str) -> list[str]:
         result = []

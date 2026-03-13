@@ -17,7 +17,7 @@ class SystemSnapshot:
         self.adb_timeout_sec = adb_timeout_sec
         self._log = on_log or (lambda m: None)
 
-    def capture(self, tag: str, out_dir: Path) -> Stage2Snapshot:
+    def capture(self, tag: str, out_dir: Path, package_name: str | None = None) -> Stage2Snapshot:
         adb = find_sdk_bin("adb")
         out_dir.mkdir(parents=True, exist_ok=True)
         snap = Stage2Snapshot(tag=tag)
@@ -32,12 +32,22 @@ class SystemSnapshot:
         pkg_path.write_text(out, encoding="utf-8")
         snap.packages_path = str(pkg_path)
 
-        # 2. Filesystem tar of /data/data
+        # 2. Filesystem tar — app-scoped when package_name is known, full /data/data otherwise
         remote_tar = f"/sdcard/fs_{tag}.tar"
         local_tar = out_dir / f"fs_{tag}.tar"
         self._log(f"Creating filesystem snapshot tar (tag={tag})...")
+        if package_name:
+            # Scope to package-specific directories to reduce noise
+            dirs = " ".join([
+                f"/data/data/{package_name}",
+                f"/sdcard/Android/data/{package_name}",
+                f"/sdcard/Android/media/{package_name}",
+            ])
+            tar_cmd = f"tar -cf {remote_tar} {dirs} 2>/dev/null; echo done"
+        else:
+            tar_cmd = f"tar -cf {remote_tar} /data/data 2>/dev/null; echo done"
         run_command_capture(
-            [adb, "shell", f"tar -cf {remote_tar} /data/data 2>/dev/null; echo done"],
+            [adb, "shell", tar_cmd],
             timeout=self.adb_timeout_sec * 5,
         )
         run_command_capture(

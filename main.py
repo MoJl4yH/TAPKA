@@ -18,21 +18,21 @@ def main():
         default_dir = default_path if Path(default_path).exists() else str(Path.home())
         QMessageBox.information(
             None,
-            "Workspace Setup",
-            "First start: select a parent folder.\n"
-            "TAPKA will create 'tapka_workspace' inside it (with a 'projects' folder).\n"
-            f"Default suggestion: {default_path}",
+            "Настройка рабочей области",
+            "Первый запуск: выберите родительский каталог.\n"
+            "TAPKA создаст внутри него каталог 'tapka_workspace' (с подпапкой 'projects').\n"
+            f"Предлагаемый путь по умолчанию: {default_path}",
         )
         chosen = QFileDialog.getExistingDirectory(
             None,
-            "Select workspace folder for TAPKA projects",
+            "Выберите каталог рабочей области для проектов TAPKA",
             default_dir,
         )
         if not chosen:
             QMessageBox.warning(
                 None,
-                "Workspace Required",
-                "Workspace was not selected. TAPKA will close.",
+                "Требуется рабочая область",
+                "Рабочая область не выбрана. TAPKA будет закрыта.",
             )
             sys.exit(0)
         workspace_path = Path(chosen)

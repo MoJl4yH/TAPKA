@@ -1,4 +1,5 @@
 import hashlib
+import ipaddress
 import json
 import re
 import shutil
@@ -49,7 +50,7 @@ class ProgressTracker:
     log: Callable[[str], None]
     total_steps: int
     overall_start: float
-    current_message: str = "Preparing Stage 1"
+    current_message: str = "Подготовка этапа 1"
     completed_steps: int = 0
     step_durations: list[float] = field(default_factory=list)
 
@@ -76,7 +77,7 @@ class ProgressTracker:
         self.emit()
 
     def run_step(self, label: str, func):
-        self.current_message = f"Running: {label}"
+        self.current_message = f"Выполняется: {label}"
         self.log(self.current_message)
         self.emit()
         step_start = time.monotonic()
@@ -175,6 +176,15 @@ class Stage1StaticRunner:
             "source": "dex_class_loader",
         },
         {
+            "category": "ndv_payload_decode_load",
+            "pattern": r"Base64\.decode.*DexClassLoader|DexClassLoader.*Base64\.decode|Cipher\.doFinal.*loadDex|loadDex.*Cipher\.doFinal",
+            "targets": ("jadx",),
+            "confidence": "C3",
+            "evidence_type": "code",
+            "tags": {"dynamic_code"},
+            "source": "payload_decode_load",
+        },
+        {
             "category": "ndv_remote_command_shell",
             "pattern": r"Runtime\.getRuntime\(\)\.exec\(|new\s+ProcessBuilder\(",
             "targets": ("jadx",),
@@ -266,7 +276,8 @@ class Stage1StaticRunner:
         },
         {
             "category": "ndv_clipboard_monitoring",
-            "pattern": r"ClipboardManager|getPrimaryClip|addPrimaryClipChangedListener",
+            # Exclude copy-to-clipboard UI patterns (setPrimaryClip / newPlainText) which are benign
+            "pattern": r"getPrimaryClip|addPrimaryClipChangedListener",
             "targets": ("jadx",),
             "confidence": "C2",
             "evidence_type": "code",
@@ -582,10 +593,10 @@ class Stage1StaticRunner:
             "tags": set(),
             "source": "bt_enum",
         },
-        # --- Device admin ---
+        # --- Device admin (only dangerous invocations, not mere registration) ---
         {
             "category": "ndv_device_admin",
-            "pattern": r"DevicePolicyManager|BIND_DEVICE_ADMIN|DeviceAdminReceiver",
+            "pattern": r"\.lockNow\(|\.resetPassword\(|\.wipeData\(|BIND_DEVICE_ADMIN",
             "targets": ("jadx",),
             "confidence": "C2",
             "evidence_type": "code",
@@ -818,7 +829,7 @@ class Stage1StaticRunner:
         run.tools_missing = missing
         if not missing:
             return
-        error = f"Missing required tools: {', '.join(missing)}"
+        error = f"Отсутствуют обязательные инструменты: {', '.join(missing)}"
         log(error)
         run.errors.append(error)
         run.status = "Error"
@@ -857,16 +868,16 @@ class Stage1StaticRunner:
         progress: ProgressTracker,
     ) -> list[CommandResult]:
         tasks = [
-            ("File type (file)", "file", ["file", str(apk_path)], "file"),
-            ("File stat (stat)", "stat", ["stat", str(apk_path)], "stat"),
-            ("Checksum (sha256sum)", "sha256sum", ["sha256sum", str(apk_path)], "sha256sum"),
+            ("Тип файла (file)", "file", ["file", str(apk_path)], "file"),
+            ("Свойства файла (stat)", "stat", ["stat", str(apk_path)], "stat"),
+            ("Контрольная сумма (sha256sum)", "sha256sum", ["sha256sum", str(apk_path)], "sha256sum"),
             (
-                "APK signature (apksigner)",
+                "Подпись APK (apksigner)",
                 "apksigner",
                 ["apksigner", "verify", "--verbose", "--print-certs", str(apk_path)],
                 "apksigner",
             ),
-            ("APK manifest (aapt2)", "aapt2", ["aapt2", "dump", "badging", str(apk_path)], "aapt2"),
+            ("Манифест APK (aapt2)", "aapt2", ["aapt2", "dump", "badging", str(apk_path)], "aapt2"),
         ]
         results = []
         for label, tool, argv, log_label in tasks:
@@ -892,7 +903,7 @@ class Stage1StaticRunner:
     ) -> list[CommandResult]:
         results: list[CommandResult] = []
         unzip_result = state.progress.run_step(
-            "List APK entries (unzip)",
+            "Список файлов APK (unzip)",
             lambda: self._run_tool(
                 "unzip",
                 ["unzip", "-l", str(apk_path)],
@@ -902,7 +913,7 @@ class Stage1StaticRunner:
         )
         results.append(unzip_result)
         cert_list_result = state.progress.run_step(
-            "Filter META-INF certs (grep)",
+            "Фильтрация сертификатов META-INF (grep)",
             lambda: self._run_tool(
                 "grep",
                 ["grep", "-E", self.CERT_LIST_PATTERN, str(Path(unzip_result.stdout_path))],
@@ -916,11 +927,11 @@ class Stage1StaticRunner:
         cert_count = len(state.cert_names)
 
         extracted_certs = state.progress.run_step(
-            "Extract META-INF certs",
+            "Извлечение сертификатов META-INF",
             lambda: self._extract_certs(apk_path, paths.certs_dir, log, state.cert_names),
         )
         self._update_step_estimate(
-            "cert count",
+            "количество сертификатов",
             cert_count,
             len(extracted_certs),
             state.progress,
@@ -928,7 +939,7 @@ class Stage1StaticRunner:
         for index, cert_path in enumerate(extracted_certs, start=1):
             results.append(
                 state.progress.run_step(
-                    f"Cert details ({index}/{len(extracted_certs)})",
+                    f"Сведения о сертификате ({index}/{len(extracted_certs)})",
                     lambda cert_path=cert_path, index=index: self._run_tool(
                         "keytool",
                         ["keytool", "-printcert", "-file", str(cert_path)],
@@ -949,7 +960,7 @@ class Stage1StaticRunner:
         if paths.apktool_dir.exists():
             shutil.rmtree(paths.apktool_dir, ignore_errors=True)
         apktool_result = state.progress.run_step(
-            "Decode resources (apktool)",
+            "Декодирование ресурсов (apktool)",
             lambda: self._run_tool(
                 "apktool",
                 ["apktool", "d", "-f", "-o", str(paths.apktool_dir), str(apk_path)],
@@ -969,7 +980,7 @@ class Stage1StaticRunner:
         results.append(apktool_result)
         results.append(
             state.progress.run_step(
-                "Decompile code (jadx)",
+                "Декомпиляция кода (jadx)",
                 lambda: self._run_tool(
                     "jadx",
                     ["jadx", "-d", str(paths.jadx_dir), str(apk_path)],
@@ -982,14 +993,14 @@ class Stage1StaticRunner:
 
     def _update_scan_estimates(self, paths: Stage1Paths, state: PipelineState) -> list[Path]:
         state.rg_step_count = self._update_step_estimate(
-            "rg steps",
+            "шаги rg",
             state.rg_step_count,
             self._rg_step_count(paths.apktool_dir.exists(), paths.jadx_dir.exists()),
             state.progress,
         )
         so_files = list(paths.apktool_dir.rglob("*.so"))
         state.so_count_estimate = self._update_step_estimate(
-            "strings targets",
+            "цели для strings",
             state.so_count_estimate,
             len(so_files),
             state.progress,
@@ -1008,7 +1019,7 @@ class Stage1StaticRunner:
             delta = len(listed_certs) - len(cert_names)
             progress.update_total_steps(
                 progress.total_steps + delta,
-                f"Updated cert count: {len(listed_certs)}",
+                f"Обновлено количество сертификатов: {len(listed_certs)}",
             )
         return listed_certs
 
@@ -1023,7 +1034,7 @@ class Stage1StaticRunner:
             delta = current_count - previous_count
             progress.update_total_steps(
                 progress.total_steps + delta,
-                f"Updated {label}: {current_count}",
+                f"Обновлено {label}: {current_count}",
             )
         return current_count
 
@@ -1051,7 +1062,7 @@ class Stage1StaticRunner:
         )
         command_results.extend(finding_results)
         yara_result = state.progress.run_step(
-            "YARA scan",
+            "YARA-сканирование",
             lambda: self._run_yara(paths.logs_dir, paths.apktool_dir, paths.jadx_dir, apk_path),
         )
         command_results.append(yara_result)
@@ -1081,24 +1092,24 @@ class Stage1StaticRunner:
 
             report_manager = ReportManager(self.storage)
             _, html_path = progress.run_step(
-                "Generate reports",
+                "Формирование отчётов",
                 lambda: report_manager.generate_stage1(run, run_dir, findings),
             )
             run.report_path = str(html_path)
             report_manager.ensure_stub_reports(run, run_dir)
 
             self.storage.save_run(run, run_dir)
-            progress.current_message = "Done"
+            progress.current_message = "Завершено"
             progress.emit()
-            log("Stage 1 complete.")
+            log("Этап 1 завершён.")
             return run
         except Exception as exc:  # pylint: disable=broad-exception-caught
             run.status = "Error"
             run.finished_at = datetime.now().isoformat(timespec="seconds")
-            run.errors.append(f"Stage 1 failed: {exc}")
+            run.errors.append(f"Этап 1 завершился ошибкой: {exc}")
             log(traceback.format_exc())
             self.storage.save_run(run, run_dir)
-            log(f"Stage 1 failed: {exc}")
+            log(f"Этап 1 завершился ошибкой: {exc}")
             raise
 
     def _check_tools(self) -> list[str]:
@@ -1114,11 +1125,11 @@ class Stage1StaticRunner:
             if result.status != "fail":
                 continue
             if result.timed_out:
-                run.errors.append(f"{result.tool} timed out")
+                run.errors.append(f"{result.tool}: превышено время ожидания")
             elif result.error:
-                run.errors.append(f"{result.tool} failed: {result.error}")
+                run.errors.append(f"{result.tool}: ошибка выполнения: {result.error}")
             else:
-                run.errors.append(f"{result.tool} returned code {result.return_code}")
+                run.errors.append(f"{result.tool}: код возврата {result.return_code}")
 
     def _classify_result(self, result: CommandResult) -> str:
         if result.timed_out or result.error:
@@ -1193,7 +1204,7 @@ class Stage1StaticRunner:
         if not rules_path or not rules_path.is_file():
             stdout_path.write_text("", encoding="utf-8")
             stderr_path.write_text(
-                f"YARA rules not found: {rules_path}\n",
+                f"Правила YARA не найдены: {rules_path}\n",
                 encoding="utf-8",
             )
             return CommandResult(
@@ -1288,7 +1299,7 @@ class Stage1StaticRunner:
                         dest.write(source.read())
                     extracted.append(target)
         except (OSError, zipfile.BadZipFile, KeyError) as exc:
-            log(f"Failed to extract certs: {exc}")
+            log(f"Не удалось извлечь сертификаты: {exc}")
         return extracted
 
     @staticmethod
@@ -1405,7 +1416,7 @@ class Stage1StaticRunner:
                 scan_targets = self._resolve_scope_targets(scope, label, base_target, package_path)
                 for idx, target in enumerate(scan_targets):
                     # Only the first target counts as a progress step.
-                    effective_run_step = run_step if idx == 0 else (lambda lbl, fn: fn())
+                    effective_run_step = run_step if idx == 0 else (lambda _lbl, fn: fn())
                     rg_findings, result = self._rg_findings(
                         spec=spec,
                         target=target,
@@ -1981,22 +1992,24 @@ class Stage1StaticRunner:
                         sources=["manifest:boot_completed"],
                     )
                 if tag == "receiver":
-                    ndv_actions = {
-                        "android.intent.action.PACKAGE_ADDED",
-                        "android.intent.action.PACKAGE_REMOVED",
-                        "android.intent.action.NEW_OUTGOING_CALL",
-                        "android.telephony.action.PHONE_STATE_CHANGED",
-                        "android.intent.action.PHONE_STATE",
+                    # Map receiver actions to appropriate categories
+                    _RECEIVER_ACTION_CATEGORY: dict[str, str] = {
+                        "android.intent.action.PACKAGE_ADDED":    "ndv_package_monitoring",
+                        "android.intent.action.PACKAGE_REMOVED":  "ndv_package_monitoring",
+                        "android.intent.action.NEW_OUTGOING_CALL": "ndv_call_monitoring",
+                        "android.telephony.action.PHONE_STATE_CHANGED": "ndv_call_monitoring",
+                        "android.intent.action.PHONE_STATE": "ndv_call_monitoring",
                     }
                     for intent_filter in component.findall("intent-filter"):
                         for action in intent_filter.findall("action"):
                             action_name = action.get(f"{ns}name") or ""
-                            if action_name in ndv_actions:
+                            category = _RECEIVER_ACTION_CATEGORY.get(action_name)
+                            if category:
                                 self._add_manifest_finding(
                                     findings,
                                     manifest_path,
                                     run_dir,
-                                    "ndv_sms_intercept",
+                                    category,
                                     f"receiver:{name} listens to {action_name}",
                                     tags={"background"},
                                     sources=["manifest:protected_broadcast"],
@@ -2163,7 +2176,7 @@ class Stage1StaticRunner:
                 self._make_finding(
                     FindingSpec(
                         category="supplychain_signature_invalid",
-                        evidence="apksigner verification failed",
+                        evidence="Проверка apksigner завершилась ошибкой",
                         file_path=rel_path,
                         line=None,
                         column=None,
@@ -2182,7 +2195,7 @@ class Stage1StaticRunner:
                 self._make_finding(
                     FindingSpec(
                         category="supplychain_debug_certificate",
-                        evidence="Android Debug certificate",
+                        evidence="Сертификат Android Debug",
                         file_path=rel_path,
                         line=None,
                         column=None,
@@ -2204,7 +2217,7 @@ class Stage1StaticRunner:
                 self._make_finding(
                     FindingSpec(
                         category="supplychain_signature_scheme_v1_only",
-                        evidence="v1-only signature scheme",
+                        evidence="Используется только схема подписи v1",
                         file_path=rel_path,
                         line=None,
                         column=None,
@@ -2237,7 +2250,7 @@ class Stage1StaticRunner:
                     self._make_finding(
                         FindingSpec(
                             category="supplychain_debug_certificate",
-                            evidence="Android Debug certificate",
+                            evidence="Сертификат Android Debug",
                             file_path=rel_path,
                             line=None,
                             column=None,
@@ -2256,7 +2269,7 @@ class Stage1StaticRunner:
                     self._make_finding(
                         FindingSpec(
                             category="supplychain_cert_expired",
-                            evidence="certificate expired",
+                            evidence="Срок действия сертификата истёк",
                             file_path=rel_path,
                             line=None,
                             column=None,
@@ -2398,8 +2411,11 @@ class Stage1StaticRunner:
                 continue
             if host.lower() in NOISE_HOSTS:
                 continue
-            if host.startswith("10.") or host.startswith("192.168.") or host.startswith("172."):
-                continue
+            try:
+                if ipaddress.ip_address(host).is_private:
+                    continue
+            except ValueError:
+                pass  # not an IP address, continue with host-based check
             new_findings.append(
                 self._make_finding(
                     FindingSpec(
@@ -2469,7 +2485,7 @@ class Stage1StaticRunner:
                     self._make_finding(
                         FindingSpec(
                             category="sec_intent_injection_in_exported",
-                            evidence=f"Exported {class_display}: reads intent extras without validation",
+                            evidence=f"Экспортируемый компонент {class_display}: extras из Intent читаются без валидации",
                             file_path=f.file_path or "",
                             line=f.line,
                             column=f.column,
@@ -2499,7 +2515,7 @@ class Stage1StaticRunner:
             self._make_finding(
                 FindingSpec(
                     category="sec_webview_file_xss",
-                    evidence="WebView JS enabled + loadUrl(file://) from external storage",
+                    evidence="В WebView включён JavaScript и используется loadUrl(file://) из внешнего хранилища",
                     file_path=js_finding.file_path or "",
                     line=js_finding.line,
                     column=js_finding.column,
@@ -2523,7 +2539,7 @@ class Stage1StaticRunner:
         aggregated = self._make_finding(
             FindingSpec(
                 category="ndv_reflection_heavy",
-                evidence=f"reflection calls: {len(reflection)}",
+                evidence=f"Количество вызовов рефлексии: {len(reflection)}",
                 file_path=sample.file_path,
                 line=None,
                 column=None,
@@ -2562,7 +2578,7 @@ class Stage1StaticRunner:
                 self._make_finding(
                     FindingSpec(
                         category="ndv_download_execute",
-                        evidence="DownloadManager + dynamic code loading",
+                        evidence="DownloadManager в сочетании с динамической загрузкой кода",
                         file_path=hit.file_path or "",
                         line=hit.line,
                         column=hit.column,

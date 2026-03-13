@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 from analysis.runtime.clock import now_utc_iso
 from analysis.runtime.hash import sha256_file
+from analysis.localization import translate_category
 from analysis.reporting.stage3_html_report import render_report_html
 from analysis.severity import SeverityEngine
 from analysis.stages import STAGE_CROSS_TOOL, STAGE_DYNAMIC, STAGE_OVERALL, STAGE_STATIC
@@ -41,94 +42,92 @@ REPORT_FILENAMES = {
 }
 
 CATEGORY_DESCRIPTIONS = {
-    "ndv_remote_command": "Remote command channels may enable remote tasking or payload control.",
-    "ndv_traffic_intercept_vpn": "VPN/TUN indicators may allow traffic interception or monitoring.",
-    "ndv_screen_capture_mediaprojection": "MediaProjection usage can capture screens or frames.",
-    "ndv_accessibility_surveillance": "Accessibility APIs can observe UI content and actions.",
-    "ndv_keylogging_like": "Accessibility text events can resemble keylogging behavior.",
-    "ndv_mic_eavesdropping": "Audio APIs with RECORD_AUDIO suggest microphone access.",
-    "ndv_camera_surveillance": "Camera APIs combined with permissions indicate camera use.",
-    "ndv_geo_tracking_background": "Background location tracking can occur persistently.",
-    "ndv_geo_tracking_foreground": "Foreground location access can track user position.",
-    "ndv_clipboard_monitoring": "Clipboard APIs can capture copied data.",
-    "ndv_sms_intercept": "SMS permissions may allow message interception.",
-    "ndv_notification_listener": "Notification listener access can read user notifications.",
-    "ndv_overlay_abuse": "Overlay capabilities can be abused for UI phishing.",
-    "sec_tls_trust_all": "Trust-all TLS patterns weaken transport security.",
-    "sec_hostname_verifier_bypass": "Hostname verification bypass enables MITM risks.",
-    "sec_cleartext_traffic_allowed": "Cleartext traffic allowance weakens transport security.",
-    "sec_insecure_webview_bridge": "WebView JS bridges increase attack surface.",
-    "sec_insecure_webview_file_access": "WebView file access can expose local files.",
-    "sec_custom_ca_store_or_user_certs": "Custom trust store usage can weaken TLS validation.",
-    "sec_proxy_setting_modification": "Proxy settings manipulation can redirect traffic.",
-    "vul_exported_component_no_permission": "Exported components without permissions are risky.",
-    "vul_exported_provider_risky": "Exported providers can leak or expose data.",
-    "vul_fileprovider_misconfig": "FileProvider misconfigurations can expose files.",
-    "vul_pendingintent_mutable": "Mutable PendingIntent can be hijacked by other apps.",
-    "vul_deeplink_intent_injection": "Deeplink intents may allow external input injection.",
-    "vul_backup_enabled": "Backups can expose app data if not hardened.",
-    "vul_debuggable_true": "Debuggable builds are high risk in production.",
-    "ndv_dynamic_code_loading_dex": "Dynamic DEX class loading enables runtime code injection.",
-    "ndv_remote_command_shell": "Shell command execution via Runtime.exec or ProcessBuilder.",
-    "ndv_payload_decode_load": "Base64 decode combined with DEX loading suggests encrypted payload.",
-    "ndv_native_code_loader_suspicious": "Native code loading may hide functionality.",
-    "ndv_reflection_heavy": "Heavy reflection suggests obfuscation or dynamic behavior.",
-    "ndv_download_execute": "Download then execute patterns are high risk.",
-    "secret_private_key_pem": "Embedded private keys allow credential compromise.",
-    "secret_hardcoded_token_or_apikey": "Hardcoded tokens or API keys expose secrets.",
-    "secret_jwt_embedded": "Embedded JWTs can leak authentication data.",
-    "secret_password_like": "Password-like strings indicate hardcoded credentials.",
-    "secret_endpoints_hardcoded": "Hardcoded endpoints expose backend infrastructure.",
-    "persist_boot_completed": "Boot receivers indicate persistence mechanisms.",
-    "persist_workmanager_periodic": "Periodic WorkManager tasks indicate persistence.",
-    "persist_jobscheduler_periodic": "JobScheduler periodic tasks indicate persistence.",
-    "persist_alarmmanager_repeating": "Repeating alarms indicate persistence.",
-    "anomaly_root_detection": "Root checks suggest anti-analysis behavior.",
-    "anomaly_frida_xposed_magisk_detection": "Frida/Xposed detection indicates anti-tampering.",
-    "anomaly_emulator_detection": "Emulator checks indicate evasion tactics.",
-    "anomaly_obfuscation_heavy": "Heavy obfuscation can conceal intent.",
-    "anomaly_anti_debug": "Anti-debugging logic can hinder analysis.",
-    "anomaly_anti_tamper": "Anti-tampering checks detect APK modification.",
-    "anomaly_proxy_evasion": "Proxy evasion prevents traffic analysis.",
-    "anomaly_emulator_detection": "Emulator checks indicate evasion tactics.",
-    "ndv_sms_send": "SMS sending capability may indicate fraudulent behavior.",
-    "ndv_device_admin": "Device admin API enables device-wide policy enforcement.",
-    "ndv_device_identifiers": "Device identifier access may enable user tracking.",
-    "ndv_contacts_access": "Contacts/CallLog/Calendar access exposes personal information.",
-    "ndv_account_enumeration": "Account enumeration reveals user's connected services.",
-    "ndv_wifi_fingerprinting": "Wi-Fi scan results can fingerprint user location.",
-    "ndv_bluetooth_enumeration": "Bluetooth device enumeration reveals paired devices.",
-    "ndv_app_enumeration": "Installed app enumeration can profile user behavior.",
-    "ndv_proxy_bypass": "Proxy bypass prevents traffic inspection.",
-    "sec_weak_crypto": "Weak cryptographic algorithms (ECB/DES/RC4/MD5) undermine data protection.",
-    "sec_predictable_random": "Predictable SecureRandom seed compromises cryptographic operations.",
-    "sec_world_readable_writable": "World-readable/writable files expose data to other apps.",
-    "sec_external_storage_sensitive": "External storage is accessible to all apps with storage permission.",
-    "sec_webview_js_eval": "WebView JavaScript evaluation can enable XSS attacks.",
-    "sec_sql_injection": "String concatenation in SQL queries enables SQL injection.",
-    "sec_log_sensitive_data": "Sensitive data in logs is accessible via logcat.",
-    "sec_sharedprefs_sensitive": "Sensitive data in SharedPreferences is stored in plaintext XML.",
-    "sec_intent_extra_no_validation": "Intent extras without validation may allow injection.",
-    "sec_network_security_config_weak": "Weak network security configuration allows cleartext or untrusted CAs.",
-    "sec_certificate_pinning": "Certificate pinning is present — consider during dynamic analysis.",
-    "sec_cleartext_http_endpoint": "Cleartext HTTP endpoint enables traffic interception and credential theft (CWE-319).",
-    "secret_hardcoded_credentials": "Hardcoded credentials in application source code (CWE-798).",
-    "sec_broadcast_receiver_no_permission": "Dynamic BroadcastReceiver registered without permission argument (CWE-925).",
-    "sec_intent_extra_read": "Intent extras read in application code (informational).",
-    "sec_intent_injection_in_exported": "Exported component reads Intent extras without validation — intent injection risk (CWE-927).",
-    "sec_webview_js_enabled": "WebView JavaScript execution enabled (informational indicator).",
-    "sec_webview_file_xss": "WebView with JS enabled loads content from external storage — XSS/injection risk (CWE-79).",
-    "sec_implicit_broadcast_send": "Implicit broadcast without receiver restriction — any app can intercept (CWE-927).",
-    "sec_cleartext_http_protocol": "Cleartext HTTP protocol used for API communication — MITM risk (CWE-319).",
-    "sec_deprecated_http_client": "Deprecated Apache HTTP client without TLS guarantees.",
-    "sec_hardcoded_crypto_key": "Hardcoded cryptographic key in source code (CWE-321).",
-    "sec_static_iv": "Static/zero initialization vector weakens encryption (CWE-329).",
-    "anomaly_root_detection": "Root/su detection checks present in application.",
-    "vul_task_hijacking": "Exported singleTask activity without taskAffinity enables task hijacking.",
-    "supplychain_signature_invalid": "Signature verification failed.",
-    "supplychain_signature_scheme_v1_only": "v1-only signing is weaker on newer Android.",
-    "supplychain_debug_certificate": "Debug certificates should not be in production builds.",
-    "supplychain_cert_expired": "Expired certificates indicate signing issues.",
+    "ndv_remote_command": "Каналы удалённого управления могут обеспечивать удалённую оркестрацию или доставку полезной нагрузки.",
+    "ndv_traffic_intercept_vpn": "Индикаторы VPN/TUN могут указывать на перехват или мониторинг трафика.",
+    "ndv_screen_capture_mediaprojection": "Использование MediaProjection позволяет захватывать экран или отдельные кадры.",
+    "ndv_accessibility_surveillance": "API Accessibility позволяют наблюдать содержимое UI и действия пользователя.",
+    "ndv_keylogging_like": "Текстовые события Accessibility могут имитировать поведение кейлоггера.",
+    "ndv_mic_eavesdropping": "Audio API с разрешением RECORD_AUDIO указывают на доступ к микрофону.",
+    "ndv_camera_surveillance": "Camera API в сочетании с разрешениями свидетельствуют об использовании камеры.",
+    "ndv_geo_tracking_background": "Фоновое геоотслеживание может происходить постоянно.",
+    "ndv_geo_tracking_foreground": "Доступ к геолокации в активном режиме позволяет отслеживать положение пользователя.",
+    "ndv_clipboard_monitoring": "API буфера обмена позволяют захватывать скопированные данные.",
+    "ndv_sms_intercept": "Разрешения SMS могут открывать доступ к перехвату сообщений.",
+    "ndv_notification_listener": "Доступ через NotificationListener позволяет читать уведомления пользователя.",
+    "ndv_overlay_abuse": "Возможности оверлея могут использоваться для UI-фишинга.",
+    "sec_tls_trust_all": "Паттерны принятия всех TLS-сертификатов ослабляют безопасность транспорта.",
+    "sec_hostname_verifier_bypass": "Обход проверки имени хоста создаёт риски MITM-атак.",
+    "sec_cleartext_traffic_allowed": "Разрешение незашифрованного трафика снижает защиту транспортного уровня.",
+    "sec_insecure_webview_bridge": "JS-мосты WebView увеличивают поверхность атаки.",
+    "sec_insecure_webview_file_access": "Файловый доступ WebView может раскрывать локальные файлы.",
+    "sec_custom_ca_store_or_user_certs": "Нестандартное хранилище доверия может ослаблять проверку TLS.",
+    "sec_proxy_setting_modification": "Изменение настроек прокси может перенаправлять трафик.",
+    "vul_exported_component_no_permission": "Экспортируемые компоненты без разрешений несут риски безопасности.",
+    "vul_exported_provider_risky": "Экспортируемые провайдеры могут раскрывать или утечь данные.",
+    "vul_fileprovider_misconfig": "Ошибочная конфигурация FileProvider может открывать доступ к файлам.",
+    "vul_pendingintent_mutable": "Изменяемый PendingIntent может быть перехвачен другими приложениями.",
+    "vul_deeplink_intent_injection": "Deeplink-интенты могут допускать инъекцию данных из внешних источников.",
+    "vul_backup_enabled": "Резервные копии могут раскрывать данные приложения при недостаточной защите.",
+    "vul_debuggable_true": "Отладочные сборки несут высокий риск в производственной среде.",
+    "ndv_dynamic_code_loading_dex": "Динамическая загрузка DEX-классов позволяет выполнять инъекцию кода в runtime.",
+    "ndv_remote_command_shell": "Выполнение shell-команд через Runtime.exec или ProcessBuilder.",
+    "ndv_payload_decode_load": "Декодирование Base64 в сочетании с загрузкой DEX указывает на зашифрованную полезную нагрузку.",
+    "ndv_native_code_loader_suspicious": "Загрузка нативного кода может скрывать функциональность.",
+    "ndv_reflection_heavy": "Интенсивное использование рефлексии указывает на обфускацию или динамическое поведение.",
+    "ndv_download_execute": "Паттерны «скачать и выполнить» несут высокий риск.",
+    "secret_private_key_pem": "Встроенные приватные ключи открывают возможность компрометации учётных данных.",
+    "secret_hardcoded_token_or_apikey": "Жёстко заданные токены или API-ключи раскрывают секреты.",
+    "secret_jwt_embedded": "Встроенные JWT могут утечь данные аутентификации.",
+    "secret_password_like": "Строки, похожие на пароли, указывают на жёстко заданные учётные данные.",
+    "secret_endpoints_hardcoded": "Жёстко заданные конечные точки раскрывают внутреннюю инфраструктуру.",
+    "persist_boot_completed": "BOOT_COMPLETED-приёмники указывают на механизмы закрепления.",
+    "persist_workmanager_periodic": "Периодические задачи WorkManager указывают на закрепление.",
+    "persist_jobscheduler_periodic": "Периодические задачи JobScheduler указывают на закрепление.",
+    "persist_alarmmanager_repeating": "Повторяющиеся AlarmManager-события указывают на закрепление.",
+    "anomaly_root_detection": "Проверки root указывают на антианализ.",
+    "anomaly_frida_xposed_magisk_detection": "Обнаружение Frida/Xposed указывает на противодействие модификации.",
+    "anomaly_emulator_detection": "Проверки эмулятора указывают на тактики уклонения.",
+    "anomaly_obfuscation_heavy": "Сильная обфускация может скрывать назначение кода.",
+    "anomaly_anti_debug": "Логика противодействия отладке затрудняет анализ.",
+    "anomaly_anti_tamper": "Проверки целостности выявляют модификацию APK.",
+    "anomaly_proxy_evasion": "Обход прокси препятствует анализу трафика.",
+    "ndv_sms_send": "Возможность отправки SMS может указывать на мошенническое поведение.",
+    "ndv_device_admin": "Device Admin API обеспечивает управление политиками на уровне устройства.",
+    "ndv_device_identifiers": "Доступ к идентификаторам устройства может использоваться для слежения за пользователем.",
+    "ndv_contacts_access": "Доступ к контактам/журналу вызовов/календарю раскрывает персональные данные.",
+    "ndv_account_enumeration": "Перечисление учётных записей раскрывает подключённые сервисы пользователя.",
+    "ndv_wifi_fingerprinting": "Результаты Wi-Fi-сканирования могут использоваться для геолокации пользователя.",
+    "ndv_bluetooth_enumeration": "Перечисление Bluetooth-устройств раскрывает сопряжённые устройства.",
+    "ndv_app_enumeration": "Перечисление установленных приложений позволяет профилировать поведение пользователя.",
+    "ndv_proxy_bypass": "Обход прокси препятствует инспекции трафика.",
+    "sec_weak_crypto": "Слабые криптографические алгоритмы (ECB/DES/RC4/MD5) подрывают защиту данных.",
+    "sec_predictable_random": "Предсказуемый seed SecureRandom компрометирует криптографические операции.",
+    "sec_world_readable_writable": "Файлы с глобальными правами чтения/записи открыты для других приложений.",
+    "sec_external_storage_sensitive": "Внешнее хранилище доступно всем приложениям с разрешением на хранилище.",
+    "sec_webview_js_eval": "Выполнение JavaScript в WebView может открывать возможность XSS-атак.",
+    "sec_sql_injection": "Конкатенация строк в SQL-запросах создаёт риск SQL-инъекции.",
+    "sec_log_sensitive_data": "Чувствительные данные в журналах доступны через logcat.",
+    "sec_sharedprefs_sensitive": "Чувствительные данные в SharedPreferences хранятся в открытом XML.",
+    "sec_intent_extra_no_validation": "Intent extras без валидации могут допускать инъекцию данных.",
+    "sec_network_security_config_weak": "Слабая конфигурация сетевой безопасности допускает незашифрованный трафик или недоверенные CA.",
+    "sec_certificate_pinning": "Certificate pinning присутствует — учитывать при динамическом анализе.",
+    "sec_cleartext_http_endpoint": "HTTP-конечная точка без шифрования позволяет перехватывать трафик и похищать учётные данные (CWE-319).",
+    "secret_hardcoded_credentials": "Жёстко заданные учётные данные в исходном коде приложения (CWE-798).",
+    "sec_broadcast_receiver_no_permission": "Динамически зарегистрированный BroadcastReceiver без аргумента permission (CWE-925).",
+    "sec_intent_extra_read": "Чтение Intent extras в коде приложения (справочно).",
+    "sec_intent_injection_in_exported": "Экспортируемый компонент читает Intent extras без валидации — риск инъекции Intent (CWE-927).",
+    "sec_webview_js_enabled": "Включено выполнение JavaScript в WebView (справочный индикатор).",
+    "sec_webview_file_xss": "WebView с включённым JS загружает содержимое из внешнего хранилища — риск XSS/инъекции (CWE-79).",
+    "sec_implicit_broadcast_send": "Неявный broadcast без ограничения получателей — любое приложение может перехватить (CWE-927).",
+    "sec_cleartext_http_protocol": "HTTP-протокол без шифрования для API-взаимодействия — риск MITM (CWE-319).",
+    "sec_deprecated_http_client": "Устаревший HTTP-клиент Apache без гарантий TLS.",
+    "sec_hardcoded_crypto_key": "Жёстко заданный криптографический ключ в исходном коде (CWE-321).",
+    "sec_static_iv": "Статический или нулевой вектор инициализации ослабляет шифрование (CWE-329).",
+    "vul_task_hijacking": "Экспортируемая singleTask-активность без taskAffinity допускает перехват task.",
+    "supplychain_signature_invalid": "Проверка подписи завершилась ошибкой.",
+    "supplychain_signature_scheme_v1_only": "Только схема подписи V1 слабее на новых версиях Android.",
+    "supplychain_debug_certificate": "Отладочные сертификаты не должны использоваться в производственных сборках.",
+    "supplychain_cert_expired": "Просроченные сертификаты указывают на проблемы с подписью.",
 }
 
 ENDPOINT_DENYLIST = {
@@ -254,22 +253,37 @@ def _source_ref(stage: str, source: str | None, default_ref: str | None = None) 
 
 def _recommendation_for_category(category: str) -> str:
     if _category_matches(category, SECRET_CATEGORIES):
-        return "Remove hardcoded secret material and rotate affected credentials."
+        return "Удалите жёстко заданные секреты и выполните ротацию затронутых учётных данных."
     if _category_matches(category, SIGNING_CATEGORIES):
-        return "Fix the signing pipeline and verify release certificates/schemes."
+        return "Исправьте конвейер подписи и проверьте корректность сертификатов и схем релизной подписи."
     if category.startswith("vul_"):
-        return "Harden the vulnerable configuration and add regression checks."
+        return "Устраните небезопасную конфигурацию и добавьте регрессионные проверки."
     if category.startswith("sec_"):
-        return "Apply secure defaults and validate transport/application controls."
+        return "Примените безопасные настройки по умолчанию и перепроверьте прикладные и транспортные механизмы защиты."
     if _category_matches(category, NDV_CATEGORIES) or _category_matches(category, PERSISTENCE_CATEGORIES):
-        return "Validate behavior in dynamic analysis and keep only justified capabilities."
+        return "Подтвердите поведение в динамическом анализе и оставьте только обоснованные возможности."
     if _category_matches(category, ANOMALY_CATEGORIES):
-        return "Document anti-analysis behavior and validate legitimacy."
-    return "Review the finding, confirm impact, and remediate the root cause."
+        return "Задокументируйте антианалитическое поведение и подтвердите его легитимность."
+    return "Проверьте находку, подтвердите влияние и устраните корневую причину."
 
 
 def _title_for_category(category: str) -> str:
-    return category.replace("_", " ").strip().title()
+    return translate_category(category)
+
+
+def _description_for_category(category: str) -> str:
+    label = translate_category(category)
+    if _category_matches(category, SECRET_CATEGORIES):
+        return f"Выявлен индикатор категории «{label}», связанный с встраиванием секретных данных или учётных материалов."
+    if _category_matches(category, SIGNING_CATEGORIES):
+        return f"Выявлена проблема категории «{label}», связанная с целостностью и корректностью подписи APK."
+    if _category_matches(category, NDV_CATEGORIES) or _category_matches(category, PERSISTENCE_CATEGORIES):
+        return f"Статический анализ обнаружил недекларированную возможность категории «{label}»."
+    if _category_matches(category, ANOMALY_CATEGORIES):
+        return f"Обнаружен аномальный или антианалитический признак категории «{label}»."
+    if category.startswith("vul_") or category.startswith("sec_"):
+        return f"Статический анализ выявил индикатор безопасности категории «{label}»."
+    return f"Статический анализ выявил находку категории «{label}»."
 
 
 def _relpath(run_dir: Path, path: Path | str) -> str:
@@ -430,15 +444,15 @@ class ReportManager:
         return self._write_report_files(report, run_dir, STAGE_DYNAMIC)
 
     def generate_stage2_stub(self, run: Run, run_dir: Path) -> tuple[Path, Path]:
-        report = self._build_stub_report(run, run_dir, STAGE_DYNAMIC, "Dynamic analysis")
+        report = self._build_stub_report(run, run_dir, STAGE_DYNAMIC, "Динамический анализ")
         return self._write_report_files(report, run_dir, STAGE_DYNAMIC)
 
     def generate_stage3_stub(self, run: Run, run_dir: Path) -> tuple[Path, Path]:
-        report = self._build_stub_report(run, run_dir, STAGE_CROSS_TOOL, "Cross-tool analysis")
+        report = self._build_stub_report(run, run_dir, STAGE_CROSS_TOOL, "Кросс-инструментальный анализ")
         return self._write_report_files(report, run_dir, STAGE_CROSS_TOOL)
 
     def generate_overall_stub(self, run: Run, run_dir: Path) -> tuple[Path, Path]:
-        report = self._build_stub_report(run, run_dir, STAGE_OVERALL, "Overall report")
+        report = self._build_stub_report(run, run_dir, STAGE_OVERALL, "Сводный отчёт")
         return self._write_report_files(report, run_dir, STAGE_OVERALL)
 
     def regenerate_stage1_from_json(self, run_dir: Path) -> Path | None:
@@ -491,7 +505,7 @@ class ReportManager:
             status="not_implemented",
             stage_override=stage,
         )
-        notes = ["Not implemented yet.", f"{label} will be extended in future updates."]
+        notes = ["Пока не реализовано.", f"Раздел «{label}» будет расширен в следующих обновлениях."]
         return ReportV2(
             report_type="stage",
             stage=stage,
@@ -499,7 +513,7 @@ class ReportManager:
             project=project_ref,
             run=run_ref,
             tools=[],
-            artifacts=self._collect_artifacts(run_dir, stage),
+            artifacts=[],  # Stub has no artifacts belonging to this stage
             indicators=[],
             findings=[],
             sections=[
@@ -507,7 +521,7 @@ class ReportManager:
                     id="not_implemented",
                     title=label,
                     kind="text",
-                    summary="Not implemented yet.",
+                    summary="Пока не реализовано.",
                     data={"status": "not_implemented"},
                 )
             ],
@@ -525,17 +539,122 @@ class ReportManager:
         from analysis.stages import STAGE_DYNAMIC  # noqa: PLC0415 (avoid circular at module level)
 
         status = _map_run_status(run.status)
+        tools = self._collect_stage2_tools(run_dir, stage2_data)
+
+        attribution = stage2_data.get("attribution") or {}
+        pkg_info = {
+            "package_name": attribution.get("package_name"),
+            "version_name": attribution.get("version_name"),
+            "version_code": attribution.get("version_code"),
+        }
+        findings = self._extract_stage2_findings(stage2_data)
+        return ReportV2(
+            report_type="stage",
+            stage=STAGE_DYNAMIC,
+            generated_at=now_utc_iso(),
+            project=self._project_ref(project, STAGE_DYNAMIC, run_dir, package_info=pkg_info),
+            run=self._run_ref(run, run_dir, status=status),
+            tools=tools,
+            artifacts=self._collect_artifacts(run_dir, STAGE_DYNAMIC),
+            indicators=[],
+            findings=findings,
+            sections=[],
+            status=status,
+            notes=list(run.errors) if run.errors else [],
+            stage2_data=stage2_data,
+        )
+
+    def _collect_stage2_tools(self, run_dir: Path, stage2_data: dict) -> list[ToolRunV2]:
+        """Build ToolRunV2 list from Stage2 tool bundles stored in run.json."""
+        run_payload = _safe_json(run_dir / "run.json")
+        tool_entries = run_payload.get("tools") if isinstance(run_payload.get("tools"), list) else []
         env = stage2_data.get("environment") or {}
-        tools: list[ToolRunV2] = []
-        if env:
-            tools.append(
+        tool_runs: list[ToolRunV2] = []
+
+        for i, entry in enumerate(tool_entries):
+            tool_name = str(entry.get("tool") or "unknown")
+            result_rel = entry.get("tool_result")
+            result_path = (
+                run_dir / result_rel if result_rel
+                else run_dir / "tools" / tool_name / "tool_result.json"
+            )
+            result_data = _safe_json(result_path)
+
+            stdout_rel = result_data.get("stdout_path")
+            stderr_rel = result_data.get("stderr_path")
+            if stdout_rel is None:
+                cand = run_dir / "tools" / tool_name / "stdout.txt"
+                if cand.exists():
+                    stdout_rel = str(cand.relative_to(run_dir))
+            if stderr_rel is None:
+                cand = run_dir / "tools" / tool_name / "stderr.txt"
+                if cand.exists():
+                    stderr_rel = str(cand.relative_to(run_dir))
+
+            ok_value = result_data.get("ok")
+            exit_code = result_data.get("exit_code")
+            if ok_value is True:
+                t_status: ToolStatusV2 = "ok"
+            elif ok_value is False:
+                t_status = "fail"
+            elif isinstance(exit_code, int):
+                t_status = "ok" if exit_code == 0 else "fail"
+            else:
+                t_status = "skipped"
+
+            metrics: dict[str, int | float | str | bool] = {}
+            if isinstance(exit_code, int):
+                metrics["exit_code"] = exit_code
+            # Attach env metrics to first tool entry
+            if i == 0 and env:
+                for key in ("avd_name", "api_level", "adb_version", "boot_time_sec"):
+                    val = env.get(key)
+                    if isinstance(val, (bool, int, float, str)):
+                        metrics[key] = val
+
+            cmd_value = result_data.get("cmd")
+            cmd = None
+            if isinstance(cmd_value, list):
+                cmd = " ".join(str(p) for p in cmd_value)
+            elif isinstance(cmd_value, str):
+                cmd = cmd_value
+
+            outputs: dict[str, str] = {
+                **({"stdout": stdout_rel} if isinstance(stdout_rel, str) else {}),
+                **({"stderr": stderr_rel} if isinstance(stderr_rel, str) else {}),
+                **({"result_json": _relpath(run_dir, result_path)} if result_path.exists() else {}),
+            }
+            artifacts_payload = result_data.get("artifacts")
+            if isinstance(artifacts_payload, dict):
+                for key, value in artifacts_payload.items():
+                    if isinstance(key, str) and isinstance(value, str) and key not in outputs:
+                        outputs[key] = value
+
+            tool_runs.append(
+                ToolRunV2(
+                    tool=tool_name,
+                    status=t_status,
+                    version=env.get("adb_version") or None if tool_name.startswith("adb") else None,
+                    cmd=cmd,
+                    started_at=result_data.get("started_at"),
+                    finished_at=result_data.get("finished_at"),
+                    duration_ms=_duration_ms(result_data.get("started_at"), result_data.get("finished_at")),
+                    outputs=outputs,
+                    metrics=metrics,
+                    details=None,
+                )
+            )
+
+        # Fall back to single env-based entry when no tool bundles recorded
+        if not tool_runs and env:
+            tool_runs.append(
                 ToolRunV2(
                     tool="adb",
                     status="ok",
                     version=env.get("adb_version") or "",
                     cmd="adb",
-                    started_at=run.started_at,
-                    finished_at=run.finished_at,
+                    started_at=None,
+                    finished_at=None,
                     duration_ms=None,
                     outputs={},
                     metrics={
@@ -546,22 +665,64 @@ class ReportManager:
                     details=None,
                 )
             )
+        return tool_runs
 
-        return ReportV2(
-            report_type="stage",
-            stage=STAGE_DYNAMIC,
-            generated_at=now_utc_iso(),
-            project=self._project_ref(project, STAGE_DYNAMIC, run_dir),
-            run=self._run_ref(run, run_dir, status=status),
-            tools=tools,
-            artifacts=self._collect_artifacts(run_dir, STAGE_DYNAMIC),
-            indicators=[],
-            findings=[],
-            sections=[],
-            status=status,
-            notes=list(run.errors) if run.errors else [],
-            stage2_data=stage2_data,
-        )
+    def _extract_stage2_findings(self, stage2_data: dict) -> list[FindingV2]:
+        """Lift stage2_data.findings into top-level FindingV2 list."""
+        raw = stage2_data.get("findings") or []
+        result: list[FindingV2] = []
+        for f in raw:
+            if not isinstance(f, dict):
+                continue
+            finding_id = f.get("finding_id", "")
+            confidence = f.get("confidence", "C1")
+            if confidence not in ("C1", "C2", "C3"):
+                confidence = "C1"
+            # Map confidence to severity hint
+            sev: SeverityHintV2 = "info"
+            if confidence == "C3":
+                sev = "high"
+            elif confidence == "C2":
+                sev = "medium"
+            title = f.get("title", "")
+            if not title:
+                continue
+            detail = f.get("detail", "")
+            evidence_val = f.get("evidence", "")
+            evidence_items: list[EvidenceItemV2] = []
+            if evidence_val:
+                evidence_items.append(
+                    EvidenceItemV2(
+                        kind="file",
+                        file=str(evidence_val),
+                        line=None,
+                        snippet=detail[:300] if detail else None,
+                        ref=str(evidence_val),
+                    )
+                )
+            result.append(
+                FindingV2(
+                    id=_hash_id("fnd", "stage2", finding_id),
+                    category=finding_id or "stage2_finding",
+                    title=title,
+                    severity=sev,
+                    confidence=confidence,  # type: ignore[arg-type]
+                    tags=["stage2", "dynamic"],
+                    description=detail,
+                    recommendation="",
+                    evidence=evidence_items,
+                    sources=[
+                        SourceRefV2(
+                            stage=STAGE_DYNAMIC,
+                            tool="stage2",
+                            ref="artifacts/stage2_findings.json",
+                            rule=finding_id or None,
+                        )
+                    ],
+                    related_indicators=[],
+                )
+            )
+        return result
 
     def _build_stage1_report(
         self,
@@ -877,11 +1038,18 @@ class ReportManager:
                     else:
                         outputs[key] = value
 
+            # For APKiD: stdout is JSON, so _extract_version would return JSON text.
+            # Use apkid_version from metrics when available.
+            if tool_name == "apkid" and "apkid_version" in metrics:
+                version: str | None = str(metrics["apkid_version"])
+            else:
+                version = _extract_version(run_dir / stdout_rel) if isinstance(stdout_rel, str) else None
+
             tool_runs.append(
                 ToolRunV2(
                     tool=tool_name,
                     status=status,
-                    version=_extract_version(run_dir / stdout_rel) if isinstance(stdout_rel, str) else None,
+                    version=version,
                     cmd=cmd,
                     started_at=result_data.get("started_at"),
                     finished_at=result_data.get("finished_at"),
@@ -1187,7 +1355,7 @@ class ReportManager:
             value = str(item.get("value") or "").strip()
             if not value:
                 continue
-            group_name = str(item.get("group") or "").strip() or "unknown"
+            group_name = str(item.get("group") or "").strip() or "неизвестно"
             append_unique(
                 IndicatorV2(
                     id=_hash_id("ind", "apkleaks", group_name, value),
@@ -1251,10 +1419,7 @@ class ReportManager:
                     severity=_severity_hint(finding.severity),
                     confidence=finding.confidence if finding.confidence in ("C1", "C2", "C3") else "C1",
                     tags=sorted(set(finding.tags or set())),
-                    description=CATEGORY_DESCRIPTIONS.get(
-                        finding.category,
-                        "Security-relevant pattern detected by static analysis.",
-                    ),
+                    description=_description_for_category(finding.category),
                     recommendation=_recommendation_for_category(finding.category),
                     evidence=[
                         EvidenceItemV2(
@@ -1304,8 +1469,8 @@ class ReportManager:
                         severity=_severity_hint(severity),
                         confidence="C2",
                         tags=["mobsf"],
-                        description=description or "MobSF AppSec finding.",
-                        recommendation="Review the MobSF finding and implement the recommended mitigation.",
+                        description=description or "Замечание AppSec из отчёта MobSF.",
+                        recommendation="Проверьте замечание MobSF и примените рекомендуемую меру защиты.",
                         evidence=[
                             EvidenceItemV2(
                                 kind="code",
@@ -1329,16 +1494,21 @@ class ReportManager:
 
         quark_data = stage3_data.get("quark", {})
         quark_ref = quark_data.get("ref") if isinstance(quark_data.get("ref"), str) else "tools/quark/quark_output.json"
+        from analysis.quark.runner import _quark_is_matched  # noqa: PLC0415
         for item in quark_data.get("crimes", []) or []:
             if not isinstance(item, dict):
+                continue
+            if not _quark_is_matched(item):
                 continue
             rule_name = str(item.get("rule") or item.get("rule_name") or "").strip()
             crime = str(item.get("crime") or "").strip()
             score = item.get("score")
             finding_severity: SeverityHintV2 = "low"
-            if isinstance(score, (int, float)) and score >= 1:
+            if isinstance(score, (int, float)) and score > 2.0:
+                finding_severity = "high"
+            elif isinstance(score, (int, float)) and score >= 1:
                 finding_severity = "medium"
-            title = crime or f"Quark rule matched: {rule_name}"
+            title = crime or f"Сработало правило Quark: {rule_name}"
             if not title:
                 continue
             related = list(indicator_index.get(title, []))
@@ -1354,8 +1524,8 @@ class ReportManager:
                     severity=finding_severity,
                     confidence="C2",
                     tags=tags,
-                    description="Quark detected a suspicious behavior pattern.",
-                    recommendation="Validate the rule hit and investigate impacted code path.",
+                    description="Quark выявил подозрительный поведенческий шаблон.",
+                    recommendation="Проверьте корректность срабатывания правила и исследуйте затронутый путь выполнения кода.",
                     evidence=[
                         EvidenceItemV2(
                             kind="code",
@@ -1393,12 +1563,12 @@ class ReportManager:
                 FindingV2(
                     id=_hash_id("fnd", "apkid", category, value, file_path),
                     category="apkid_match",
-                    title=f"APKiD match: {category}",
+                    title=f"Совпадение APKiD: {category}",
                     severity="low",
                     confidence="C2",
                     tags=["apkid", category],
-                    description="APKiD detected obfuscation/protection signature.",
-                    recommendation="Validate if detected packers or anti-analysis logic are expected.",
+                    description="APKiD обнаружил сигнатуру упаковщика, обфускации или механизма защиты.",
+                    recommendation="Проверьте, являются ли обнаруженные упаковщики и антианалитические механизмы ожидаемыми для приложения.",
                     evidence=[
                         EvidenceItemV2(
                             kind="string",
@@ -1438,12 +1608,12 @@ class ReportManager:
                 FindingV2(
                     id=_hash_id("fnd", "apkleaks", group_name, str(count)),
                     category=f"apkleaks_{category_slug}",
-                    title=f"APKLeaks group: {group_name}",
+                    title=f"Группа APKLeaks: {group_name}",
                     severity=finding_severity,
                     confidence="C1",
                     tags=["apkleaks", group_name],
-                    description=f"APKLeaks detected {count if isinstance(count, int) else 0} matches in group {group_name}.",
-                    recommendation="Review matched values and remove non-public secrets/configuration from APK.",
+                    description=f"APKLeaks выявил {count if isinstance(count, int) else 0} совпадений в группе {group_name}.",
+                    recommendation="Проверьте найденные значения и удалите из APK непубличные секреты и конфиденциальную конфигурацию.",
                     evidence=[
                         EvidenceItemV2(
                             kind="string",
@@ -1475,21 +1645,21 @@ class ReportManager:
         sections = [
             SectionV2(
                 id="manifest",
-                title="Manifest",
+                title="Манифест",
                 kind="json_ref",
                 summary=(
-                    f"permissions={len(manifest['permissions'])}, "
-                    f"exported={len(manifest['exported'])}, "
-                    f"flags={len(manifest['flags'])}"
+                    f"разрешений={len(manifest['permissions'])}, "
+                    f"экспортируемых={len(manifest['exported'])}, "
+                    f"флагов={len(manifest['flags'])}"
                 ),
                 ref=manifest_ref,
                 data=manifest,
             ),
             SectionV2(
                 id="endpoints",
-                title="Endpoints",
+                title="Конечные точки",
                 kind="table",
-                summary=f"urls={endpoints['urls']}, ips={endpoints['ips']}",
+                summary=f"URL={endpoints['urls']}, IP={endpoints['ips']}",
                 ref="artifacts/endpoints.urls.json",
                 data={
                     "summary": endpoints,
@@ -1498,38 +1668,38 @@ class ReportManager:
             ),
             SectionV2(
                 id="signing",
-                title="Signing",
+                title="Подпись",
                 kind="table",
-                summary=f"issues={sum(signing.values())}",
+                summary=f"замечаний={sum(signing.values())}",
                 ref="logs/apksigner.stdout.txt",
                 data=signing,
             ),
             SectionV2(
                 id="signing_details",
-                title="Signing details",
+                title="Сведения о подписи",
                 kind="json_ref",
                 summary=(
-                    f"schemes={len(signing_details.get('schemes', {}))}, "
-                    f"issues={signing_details.get('issues_total', 0)}"
+                    f"схем={len(signing_details.get('schemes', {}))}, "
+                    f"замечаний={signing_details.get('issues_total', 0)}"
                 ),
                 ref="logs/apksigner.stdout.txt",
                 data=signing_details,
             ),
             SectionV2(
                 id="findings_by_category",
-                title="Findings by category",
+                title="Находки по категориям",
                 kind="table",
-                summary=f"categories={len(findings_by_category)}",
+                summary=f"категорий={len(findings_by_category)}",
                 ref="findings/findings.json",
                 data=findings_by_category,
             ),
             SectionV2(
                 id="native_strings",
-                title="Native strings",
+                title="Строки нативных библиотек",
                 kind="json_ref",
                 summary=(
-                    f"so_files={native_strings.get('so_files', 0)}, "
-                    f"hits={native_strings.get('hits_total', 0)}"
+                    f".so-файлов={native_strings.get('so_files', 0)}, "
+                    f"совпадений={native_strings.get('hits_total', 0)}"
                 ),
                 ref=native_strings.get("ref"),
                 data=native_strings,
@@ -1545,9 +1715,9 @@ class ReportManager:
             sections.append(
                 SectionV2(
                     id="normalized_indicators",
-                    title="Normalized indicators",
+                    title="Нормализованные индикаторы",
                     kind="json_ref",
-                    summary="Normalized Stage3 indicators for manual review.",
+                    summary="Нормализованные индикаторы этапа 3 для ручной проверки.",
                     ref=normalized_ref,
                     data=None,
                 )
@@ -1558,9 +1728,9 @@ class ReportManager:
         if (run_dir / mobsf_ref).exists() or mobsf_data.get("present"):
             score = mobsf_data.get("security_score")
             summary = (
-                f"MobSF security_score={score}"
+                f"Оценка безопасности MobSF={score}"
                 if isinstance(score, (int, float))
-                else "MobSF artifacts and parsed summary."
+                else "Артефакты MobSF и извлечённая сводка."
             )
             sections.append(
                 SectionV2(
@@ -1575,11 +1745,11 @@ class ReportManager:
             sections.append(
                 SectionV2(
                     id="mobsf_details",
-                    title="MobSF details",
+                    title="Сведения MobSF",
                     kind="json_ref",
                     summary=(
-                        f"high={mobsf_data.get('findings_high', 0)}, "
-                        f"warning={mobsf_data.get('findings_warning', 0)}"
+                        f"критичных={mobsf_data.get('findings_high', 0)}, "
+                        f"предупреждений={mobsf_data.get('findings_warning', 0)}"
                     ),
                     ref=mobsf_ref if (run_dir / mobsf_ref).exists() else None,
                     data={
@@ -1598,9 +1768,9 @@ class ReportManager:
             matched = quark_data.get("rules_matched")
             total = quark_data.get("rules_total")
             summary = (
-                f"Quark rules_matched={matched}/{total}"
+                f"Сработавших правил Quark={matched}/{total}"
                 if isinstance(matched, int) and isinstance(total, int)
-                else "Quark rule execution outputs."
+                else "Результаты выполнения правил Quark."
             )
             sections.append(
                 SectionV2(
@@ -1615,7 +1785,7 @@ class ReportManager:
             sections.append(
                 SectionV2(
                     id="quark_details",
-                    title="Quark details",
+                    title="Сведения Quark",
                     kind="json_ref",
                     summary=summary,
                     ref=quark_ref if (run_dir / quark_ref).exists() else None,
@@ -1635,9 +1805,9 @@ class ReportManager:
             sections.append(
                 SectionV2(
                     id="apkid_details",
-                    title="APKiD details",
+                    title="Сведения APKiD",
                     kind="json_ref",
-                    summary=f"matches={apkid_data.get('matches_total', 0)}",
+                    summary=f"совпадений={apkid_data.get('matches_total', 0)}",
                     ref=apkid_ref if (run_dir / apkid_ref).exists() else None,
                     data={
                         "apkid_version": apkid_data.get("apkid_version"),
@@ -1656,11 +1826,11 @@ class ReportManager:
             sections.append(
                 SectionV2(
                     id="apkleaks_details",
-                    title="APKLeaks details",
+                    title="Сведения APKLeaks",
                     kind="json_ref",
                     summary=(
-                        f"groups={apkleaks_data.get('groups_total', 0)}, "
-                        f"leaks={apkleaks_data.get('leaks_total', 0)}"
+                        f"групп={apkleaks_data.get('groups_total', 0)}, "
+                        f"утечек={apkleaks_data.get('leaks_total', 0)}"
                     ),
                     ref=apkleaks_ref if (run_dir / apkleaks_ref).exists() else None,
                     data={
@@ -1674,9 +1844,9 @@ class ReportManager:
         sections.append(
             SectionV2(
                 id="tools",
-                title="Tools",
+                title="Инструменты",
                 kind="table",
-                summary=f"tool_runs={len(tools)}",
+                summary=f"запусков инструментов={len(tools)}",
                 ref="run.json",
                 data=[
                     {
@@ -1922,7 +2092,8 @@ class ReportManager:
                     )
                 crimes = parsed
                 if rules_matched == 0:
-                    rules_matched = len(parsed)
+                    from analysis.quark.runner import _quark_is_matched  # noqa: PLC0415
+                    rules_matched = sum(1 for c in parsed if _quark_is_matched(c))
                 if rules_total == 0:
                     rules_total = len(parsed)
 
@@ -1938,7 +2109,8 @@ class ReportManager:
         threat_level = raw.get("threat_level") if isinstance(raw, dict) else None
         total_score = raw.get("total_score") if isinstance(raw, dict) else None
         if not rules_matched:
-            rules_matched = len(deduped_crimes)
+            from analysis.quark.runner import _quark_is_matched  # noqa: PLC0415
+            rules_matched = sum(1 for c in deduped_crimes if _quark_is_matched(c))
         if not rules_total:
             rules_total = rules_matched
         return {

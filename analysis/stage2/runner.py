@@ -101,7 +101,7 @@ class Stage2DynamicRunner:
         ensure_run_json(ctx)
 
         log = build_stage3_logger(run_dir / "logs" / "stage2.log", self.on_progress)
-        log("Stage 2 Dynamic Analysis started.")
+        log("Запущен этап 2: динамический анализ.")
 
         tools_dir = run_dir / "tools"
         snap_dir = tools_dir / "adb_snapshot"
@@ -126,6 +126,7 @@ class Stage2DynamicRunner:
 
         tools_index: list[dict] = []
         traffic_started = False
+        pcap_pulled = False
         pkg_name = ""
         app_uid = ""
         app_pid = ""
@@ -133,19 +134,20 @@ class Stage2DynamicRunner:
         exerciser_sent = 0
         exerciser_total = 0
         run_start_ts = time.monotonic()
+        capture_end_ts = run_start_ts  # will be updated after traffic capture
 
         try:
             # ----------------------------------------------------------------
             # Step 1: Start emulator
             # ----------------------------------------------------------------
             boot_start = time.monotonic()
-            log("Step 1: Starting emulator...")
+            log("Шаг 1: запуск эмулятора...")
             emulator.start(headless=True)
             booted = emulator.wait_boot(timeout_sec=self.config.emulator_boot_timeout_sec)
             if not booted:
                 raise RuntimeError(
-                    f"Emulator failed to boot within {self.config.emulator_boot_timeout_sec}s. "
-                    "Ensure KVM is available and AVD exists."
+                    f"Эмулятор не загрузился за {self.config.emulator_boot_timeout_sec} с. "
+                    "Убедитесь, что KVM доступен и AVD создан."
                 )
             boot_time = int(time.monotonic() - boot_start)
             emulator.root()
@@ -159,18 +161,25 @@ class Stage2DynamicRunner:
                 "adb_version": adb_version,
                 "boot_time_sec": boot_time,
             }
-            log(f"Emulator ready in {boot_time}s.")
+            log(f"Эмулятор готов через {boot_time} с.")
 
             # ----------------------------------------------------------------
-            # Step 2: Baseline snapshot
+            # Step 2: Resolve package name (before baseline snapshot so scope
+            #         matches between before/after snapshots)
             # ----------------------------------------------------------------
-            log("Step 2: Capturing baseline snapshot...")
-            snap_before = snap.capture("before", snap_dir)
+            pkg_name = self._get_package_name(apk_path, run_dir, log)
+            log(f"Имя пакета: {pkg_name or '(неизвестно)'}")
+
+            # ----------------------------------------------------------------
+            # Step 2: Baseline snapshot (scoped to package when known)
+            # ----------------------------------------------------------------
+            log("Шаг 2: снятие базового снимка...")
+            snap_before = snap.capture("before", snap_dir, package_name=pkg_name)
 
             # ----------------------------------------------------------------
             # Step 3: APK install → resolve UID
             # ----------------------------------------------------------------
-            log("Step 3: Installing APK...")
+            log("Шаг 3: установка APK...")
             t_install_start = now_utc_iso()
             install_code, install_stdout, install_stderr = installer.install(apk_path)
             t_install_end = now_utc_iso()
@@ -186,26 +195,23 @@ class Stage2DynamicRunner:
             )
             tools_index.append(idx)
             if install_code != 0:
-                raise RuntimeError(f"APK installation failed (exit={install_code}).")
-
-            pkg_name = self._get_package_name(apk_path, run_dir, log)
-            log(f"Package name: {pkg_name or '(unknown)'}")
+                raise RuntimeError(f"Не удалось установить APK (exit={install_code}).")
 
             if pkg_name:
                 app_uid = self._resolve_uid(pkg_name, adb, log)
                 if app_uid:
-                    log(f"App UID: {app_uid}")
+                    log(f"UID приложения: {app_uid}")
 
             # ----------------------------------------------------------------
             # Step 4: Post-install snapshot
             # ----------------------------------------------------------------
-            log("Step 4: Post-install snapshot...")
-            snap_after_install = snap.capture("after_install", snap_dir)
+            log("Шаг 4: снимок после установки...")
+            snap_after_install = snap.capture("after_install", snap_dir, package_name=pkg_name)
 
             # ----------------------------------------------------------------
             # Step 5: Install diff
             # ----------------------------------------------------------------
-            log("Step 5: Computing install diff...")
+            log("Шаг 5: вычисление различий после установки...")
             install_diff = differ.compute(snap_before, snap_after_install, diffs_dir)
             stage2_data["install_diff"] = {
                 "new_packages": install_diff.new_packages,
@@ -216,11 +222,12 @@ class Stage2DynamicRunner:
 
             # ----------------------------------------------------------------
             # Step 6: Start logcat + traffic capture
+            # NOTE: Traffic capture starts AFTER APK installation. Any network
+            # activity during install-time (Step 3) is NOT captured in the PCAP.
             # ----------------------------------------------------------------
-            log("Step 6: Starting logcat and traffic capture...")
+            log("Шаг 6: запуск сбора logcat и сетевого трафика...")
             logcat_path = tools_dir / "adb_logcat" / "logcat_runtime.txt"
             t_runtime_start = now_utc_iso()
-            capture_start_ts = time.monotonic()  # measure only the capture window
             logcat.start(logcat_path)
             pcap_local = tools_dir / "adb_traffic" / "traffic_runtime.pcap"
             traffic_started = traffic.start()
@@ -230,7 +237,7 @@ class Stage2DynamicRunner:
             # ----------------------------------------------------------------
             exerciser: UiExerciser | None = None
             if pkg_name:
-                log(f"Step 7: Launching app ({pkg_name})...")
+                log(f"Шаг 7: запуск приложения ({pkg_name})...")
                 run_command_capture(
                     [adb, "shell", "monkey", "-p", pkg_name,
                      "-c", "android.intent.category.LAUNCHER", "1"],
@@ -256,15 +263,16 @@ class Stage2DynamicRunner:
                 exerciser.start()
                 exerciser_total = exerciser.events
             else:
-                log("Step 7: Package name unknown, skipping Monkey launch.")
+                log("Шаг 7: имя пакета не определено, запуск Monkey пропущен.")
 
-            log(f"Capturing for {self.config.runtime_duration_sec}s...")
+            log(f"Выполняется захват в течение {self.config.runtime_duration_sec} с...")
+            capture_start_ts = time.monotonic()  # window starts when exerciser is running
             time.sleep(self.config.runtime_duration_sec)
 
             # ----------------------------------------------------------------
             # Step 8: Stop exerciser + monitors + logcat + traffic
             # ----------------------------------------------------------------
-            log("Step 8: Stopping UI exerciser, logcat, and traffic capture...")
+            log("Шаг 8: остановка UI-экзерсайзера, logcat и захвата трафика...")
             if exerciser is not None:
                 exerciser.stop()
                 exerciser_sent = exerciser._sent  # noqa: SLF001
@@ -291,7 +299,8 @@ class Stage2DynamicRunner:
             tools_index.append(idx)
 
             if traffic_started:
-                traffic.stop_and_pull(pcap_local)
+                pcap_pulled = traffic.stop_and_pull(pcap_local)
+            capture_end_ts = time.monotonic()  # end of capture window (before post-processing)
 
             idx = write_tool_bundle(
                 ctx, "adb_traffic",
@@ -299,7 +308,7 @@ class Stage2DynamicRunner:
                      "-w", "/sdcard/traffic.pcap"],
                 started_at=t_runtime_start,
                 finished_at=t_runtime_end,
-                exit_code=0 if traffic_started else 1,
+                exit_code=0 if pcap_pulled else 1,
                 stdout="",
                 stderr="" if traffic_started else "tcpdump not available on device",
                 artifacts={"pcap": str(pcap_local)},
@@ -310,7 +319,7 @@ class Stage2DynamicRunner:
             # Step 8.5: Force-stop app before snapshot (flush DBs, release locks)
             # ----------------------------------------------------------------
             if pkg_name:
-                log(f"Force-stopping {pkg_name} before snapshot...")
+                log(f"Принудительная остановка {pkg_name} перед снятием снимка...")
                 run_command_capture(
                     [adb, "shell", "am", "force-stop", pkg_name],
                     timeout=self.config.adb_timeout_sec,
@@ -320,8 +329,8 @@ class Stage2DynamicRunner:
             # ----------------------------------------------------------------
             # Step 9: Post-runtime snapshot + diff
             # ----------------------------------------------------------------
-            log("Step 9: Post-runtime snapshot and diff...")
-            snap_after_runtime = snap.capture("after_runtime", snap_dir)
+            log("Шаг 9: снимок после выполнения и построение различий...")
+            snap_after_runtime = snap.capture("after_runtime", snap_dir, package_name=pkg_name)
             runtime_diff = differ.compute(snap_after_install, snap_after_runtime, diffs_dir)
 
             # ----------------------------------------------------------------
@@ -346,13 +355,14 @@ class Stage2DynamicRunner:
             # ----------------------------------------------------------------
             # Step 10: Zeek / tshark analysis (with TSV exports + alerts)
             # ----------------------------------------------------------------
-            log("Step 10: Running Zeek analysis...")
+            log("Шаг 10: анализ сетевого трафика средствами Zeek/tshark...")
             zeek_dir = tools_dir / "zeek"
-            actual_duration = time.monotonic() - capture_start_ts
+            actual_duration = capture_end_ts - capture_start_ts
             net_capture = zeek.analyze(pcap_local, zeek_dir,
                                        capture_duration_sec=actual_duration)
             stage2_data["network"] = {
                 "pcap_path": str(pcap_local),
+                "pcap_pull_success": pcap_pulled,
                 "unique_ips": net_capture.unique_ips,
                 "unique_domains": net_capture.unique_domains,
                 "top_hosts": net_capture.top_hosts,
@@ -367,7 +377,7 @@ class Stage2DynamicRunner:
                     if net_capture.alerts else "",
             }
             if not net_capture.zeek_available:
-                append_run_error(run, "Zeek/tshark not installed; pcap saved for manual analysis.")
+                append_run_error(run, "Zeek/tshark не установлен; PCAP сохранён для ручного анализа.")
 
             # ----------------------------------------------------------------
             # Crash detection from logcat
@@ -452,20 +462,20 @@ class Stage2DynamicRunner:
             }
 
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            log(f"Stage 2 failed: {exc}")
+            log(f"Этап 2 завершился ошибкой: {exc}")
             run.status = "Error"
             run.finished_at = now_utc_iso()  # UTC — fixes duration_sec bug
-            append_run_error(run, f"Stage2 error: {exc}")
+            append_run_error(run, f"Ошибка этапа 2: {exc}")
         else:
             run.status = "Done"
             run.finished_at = now_utc_iso()  # UTC — fixes duration_sec bug
-            log("Stage 2 completed successfully.")
+            log("Этап 2 успешно завершён.")
         finally:
             # Step 11: Stop emulator (always)
             try:
                 emulator.stop()
             except Exception as exc:  # pylint: disable=broad-exception-caught
-                log(f"Emulator stop error: {exc}")
+                log(f"Ошибка при остановке эмулятора: {exc}")
 
         # Generate report
         try:
@@ -473,10 +483,10 @@ class Stage2DynamicRunner:
             _, html_path = report_manager.generate_stage2(run, run_dir, stage2_data)
             run.report_path = str(html_path)
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            log(f"Report generation failed: {exc}")
+            log(f"Не удалось сформировать отчёт: {exc}")
 
         write_run_finished(ctx, now_utc_iso(), tools_index)
-        log("Stage 2 run finalized.")
+        log("Запуск этапа 2 финализирован.")
         return run
 
     # ------------------------------------------------------------------
@@ -498,23 +508,25 @@ class Stage2DynamicRunner:
                         if m:
                             return m.group(1)
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            log(f"UID resolution failed: {exc}")
+            log(f"Не удалось определить UID: {exc}")
         return ""
 
     def _resolve_pid(self, pkg_name: str, adb: str, log: Callable) -> str:
-        """Resolve PID of running package via pidof."""
-        try:
-            code, out, _ = run_command_capture(
-                [adb, "shell", "pidof", pkg_name],
-                timeout=self.config.adb_timeout_sec,
-            )
-            if code == 0:
-                pid = out.strip().split()[0] if out.strip() else ""
-                if pid:
-                    log(f"App PID: {pid}")
-                    return pid
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-            log(f"PID resolution failed: {exc}")
+        """Resolve PID of running package via pidof, with retry for slow emulators."""
+        for attempt in range(5):
+            try:
+                code, out, _ = run_command_capture(
+                    [adb, "shell", "pidof", pkg_name],
+                    timeout=self.config.adb_timeout_sec,
+                )
+                if code == 0:
+                    pid = out.strip().split()[0] if out.strip() else ""
+                    if pid:
+                        log(f"PID приложения: {pid}")
+                        return pid
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                log(f"Не удалось определить PID (попытка {attempt + 1}): {exc}")
+            time.sleep(1)
         return ""
 
     def _capture_pkg_files(
@@ -536,14 +548,14 @@ class Stage2DynamicRunner:
                     ln.strip().split()[-1]
                     for ln in out.splitlines()
                     if ln.strip() and not ln.startswith("total") and not ln.startswith("/")
-                    and not ln.strip().startswith("d") and ":" in ln
+                    and ":" in ln
                 ]
-                log(f"App data dir: {len(paths)} file entries found.")
+                log(f"Каталог данных приложения: найдено {len(paths)} файловых записей.")
                 return paths
             else:
-                log(f"App data dir empty or inaccessible: {data_dir}")
+                log(f"Каталог данных приложения пуст или недоступен: {data_dir}")
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            log(f"pkg_files capture failed: {exc}")
+            log(f"Не удалось получить список файлов пакета: {exc}")
         return []
 
     def _capture_appops(
@@ -560,10 +572,10 @@ class Stage2DynamicRunner:
             appops_path = appops_dir / "appops_after_runtime.txt"
             if code == 0 and out.strip():
                 appops_path.write_text(out, encoding="utf-8", errors="replace")
-                log(f"appops snapshot saved → {appops_path}")
+                log(f"Снимок appops сохранён → {appops_path}")
                 return str(appops_path)
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            log(f"appops capture failed: {exc}")
+            log(f"Не удалось получить снимок appops: {exc}")
         return ""
 
     def _detect_crash(self, logcat_path: str, pkg_name: str) -> dict:
@@ -619,26 +631,26 @@ class Stage2DynamicRunner:
             findings.append(Stage2Finding(
                 finding_id="info_low_exerciser_coverage",
                 confidence="C1",
-                title=f"Low exerciser coverage ({coverage_pct:.0%})",
+                title=f"Низкое покрытие UI-экзерсайзера ({coverage_pct:.0%})",
                 detail=(
-                    f"UiExerciser completed {coverage_pct:.0%} of configured events. "
-                    "Negative findings (no NDV observed) have reduced confidence. "
-                    + ("Coverage <20%: all negative findings are unreliable." if coverage_pct < 0.20 else "")
+                    f"UI-экзерсайзер выполнил {coverage_pct:.0%} от заданного числа событий. "
+                    "Отрицательные результаты (НДВ не наблюдались) имеют сниженную достоверность. "
+                    + ("Покрытие <20%: всем отрицательным выводам нельзя доверять." if coverage_pct < 0.20 else "")
                 ),
             ))
 
         # info_app_crashed_during_exercise (NOT suppressed by duration gate)
         if app_crashed:
-            detail = f"App process died during capture window."
+            detail = f"Процесс приложения завершился в течение окна захвата."
             if crash_time:
-                detail += f" PID disappeared at {crash_time}."
+                detail += f" PID исчез в {crash_time}."
             if crash_info.get("snippet"):
                 snippet = crash_info["snippet"][:300].replace("\n", " ")
-                detail += f" Crash snippet: {snippet}"
+                detail += f" Фрагмент сбоя: {snippet}"
             findings.append(Stage2Finding(
                 finding_id="info_app_crashed_during_exercise",
                 confidence="C1",
-                title="App process died during exercise window",
+                title="Процесс приложения завершился во время упражнения",
                 detail=detail,
                 evidence=pid_logcat_out or "",
             ))
@@ -650,10 +662,10 @@ class Stage2DynamicRunner:
                 findings.append(Stage2Finding(
                     finding_id="info_app_produced_no_logcat",
                     confidence="C1",
-                    title="App produced no logcat output",
+                    title="Приложение не сгенерировало сообщений в logcat",
                     detail=(
-                        "PID-filtered logcat stream is empty. App ran but emitted no log messages. "
-                        "Possible: anti-analysis, NDK-only logging with custom tag, or immediate crash."
+                        "Поток logcat, отфильтрованный по PID, пуст. Приложение выполнялось, но не вывело сообщений. "
+                        "Возможные причины: антианализ, логирование только из NDK с нестандартным тегом или немедленный сбой."
                     ),
                     evidence=pid_logcat_out,
                 ))
@@ -669,10 +681,10 @@ class Stage2DynamicRunner:
             findings.append(Stage2Finding(
                 finding_id="info_app_no_filesystem_writes",
                 confidence="C1",
-                title="No files in app data directory after runtime",
+                title="После выполнения отсутствуют файлы в каталоге данных приложения",
                 detail=(
-                    f"No files found in /data/data/{pkg_name} after runtime. "
-                    "App may operate in-memory only, store data server-side, or have crashed before writing."
+                    f"После выполнения не найдено файлов в /data/data/{pkg_name}. "
+                    "Приложение может работать только в памяти, хранить данные на сервере или завершиться до записи на диск."
                 ),
                 suppressed=suppressed,
                 suppression_reason="Coverage <30%: snapshot evidence unreliable." if suppressed else "",
@@ -695,7 +707,7 @@ class Stage2DynamicRunner:
                 "sec_runtime_cleartext_transport",
             ):
                 f.suppressed = True
-                f.suppression_reason = f"Duration gate: run too short ({actual_duration:.0f}s < 30s)."
+                f.suppression_reason = f"Ограничение по длительности: запуск слишком короткий ({actual_duration:.0f} с < 30 с)."
             findings.append(f)
 
         # Feature 4: appops findings (BIND_ACCESSIBILITY_SERVICE etc.)
@@ -717,19 +729,19 @@ class Stage2DynamicRunner:
     _SENSITIVE_APPOPS: dict[str, tuple[str, str]] = {
         "BIND_ACCESSIBILITY_SERVICE": (
             "C2",
-            "Accessibility service binding active at runtime",
+            "Во время выполнения активна привязка службы Accessibility",
         ),
         "SYSTEM_ALERT_WINDOW": (
             "C1",
-            "SYSTEM_ALERT_WINDOW permission used (overlay capability)",
+            "Во время выполнения используется SYSTEM_ALERT_WINDOW (возможность оверлея)",
         ),
         "WRITE_SETTINGS": (
             "C1",
-            "WRITE_SETTINGS permission used at runtime",
+            "Во время выполнения используется WRITE_SETTINGS",
         ),
         "PROCESS_OUTGOING_CALLS": (
             "C2",
-            "PROCESS_OUTGOING_CALLS op active at runtime",
+            "Во время выполнения активна операция PROCESS_OUTGOING_CALLS",
         ),
     }
 
@@ -752,8 +764,8 @@ class Stage2DynamicRunner:
                             confidence=confidence,
                             title=title,
                             detail=(
-                                f"AppOps snapshot shows {op_name} in state 'allow' after runtime. "
-                                f"Raw entry: {stripped[:200]}"
+                                f"Снимок AppOps показывает, что {op_name} находится в состоянии 'allow' после выполнения. "
+                                f"Необработанная запись: {stripped[:200]}"
                             ),
                             evidence=appops_path,
                         ))
@@ -765,13 +777,13 @@ class Stage2DynamicRunner:
 
     # Library name substrings considered suspicious + reason
     _SUSPICIOUS_LIB_PATTERNS: list[tuple[str, str]] = [
-        ("libsqlcipher", "Encrypted SQLite (SQLCipher) — covert data storage"),
-        ("libudt",       "UDT P2P protocol library — uncommon transport"),
-        ("libshadowsocks", "Shadowsocks proxy library"),
-        ("libfrida",     "Frida instrumentation library loaded by app"),
-        ("libreflect",   "Reflection/hiding library"),
-        ("libdexposed",  "Dexposed hooking framework"),
-        ("libsubstrate", "Cydia Substrate hooking framework"),
+        ("libsqlcipher", "Зашифрованная SQLite (SQLCipher) — скрытое хранение данных"),
+        ("libudt",       "Библиотека P2P-транспорта UDT — нестандартный протокол"),
+        ("libshadowsocks", "Библиотека прокси Shadowsocks"),
+        ("libfrida",     "Инструментальная библиотека Frida, загружена приложением"),
+        ("libreflect",   "Библиотека рефлексии/сокрытия"),
+        ("libdexposed",  "Фреймворк перехвата Dexposed"),
+        ("libsubstrate", "Фреймворк перехвата Cydia Substrate"),
     ]
 
     def _detect_suspicious_libs(self, pid_logcat_out: str) -> list[Stage2Finding]:
@@ -803,10 +815,10 @@ class Stage2DynamicRunner:
         return [Stage2Finding(
             finding_id="ndv_suspicious_native_libs",
             confidence="C2",
-            title=f"Suspicious native library/libraries loaded: {', '.join(f[0] for f in found)}",
+            title=f"Загружены подозрительные нативные библиотеки: {', '.join(f[0] for f in found)}",
             detail=(
-                f"App process loaded {len(found)} suspicious native library/libraries: {detail_lines}. "
-                "Evidence from PID-filtered logcat linker messages."
+                f"Процесс приложения загрузил {len(found)} подозрительных нативных библиотек: {detail_lines}. "
+                "Основание: сообщения линковщика из потока logcat, отфильтрованного по PID."
             ),
             evidence=pid_logcat_out,
         )]
@@ -839,6 +851,6 @@ class Stage2DynamicRunner:
                             if part.startswith("name="):
                                 return part.split("=", 1)[1].strip("'\"")
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            log(f"Package name detection failed: {exc}")
+            log(f"Не удалось определить имя пакета: {exc}")
 
         return ""

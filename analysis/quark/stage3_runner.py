@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
 from analysis.quark import QuarkConfig, QuarkRunner
+from analysis.runtime.clock import now_utc_iso
 from analysis.reporting import ReportManager
 from analysis.normalize.stage3 import normalize_stage3
 from analysis.runtime.context import RunContext
@@ -47,8 +47,8 @@ class Stage3QuarkRunner:
         quark_dir = run_dir / "artifacts" / "quark"
         quark_dir.mkdir(parents=True, exist_ok=True)
 
-        log("Stage3 Quark run started.")
-        emit_progress(self.on_progress, "Starting Quark Stage3 analysis...")
+        log("Запущен анализ Quark на этапе 3.")
+        emit_progress(self.on_progress, "Запуск анализа Quark для этапа 3...")
 
         quark_report: QuarkReport | None = None
         try:
@@ -60,20 +60,20 @@ class Stage3QuarkRunner:
                 error_message = self._quark_failure_message(quark_report)
                 append_run_error(run, error_message)
                 log(error_message)
-            run.finished_at = datetime.now().isoformat(timespec="seconds")
+            run.finished_at = now_utc_iso()
             report_manager = ReportManager(self.storage)
             _, html_path = report_manager.generate_stage3(run, run_dir, None, quark_report)
             run.report_path = str(html_path)
             if run.status == "Done":
-                log("Stage3 Quark run completed.")
+                log("Анализ Quark на этапе 3 завершён.")
             else:
-                log("Stage3 Quark run completed with errors.")
+                log("Анализ Quark на этапе 3 завершён с ошибками.")
             return run
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            log(f"Stage3 Quark run failed: {exc}")
+            log(f"Анализ Quark на этапе 3 завершился ошибкой: {exc}")
             run.status = "Error"
-            run.finished_at = datetime.now().isoformat(timespec="seconds")
-            append_run_error(run, f"Stage3 Quark failed: {exc}")
+            run.finished_at = now_utc_iso()
+            append_run_error(run, f"Quark на этапе 3 завершился ошибкой: {exc}")
             report_manager = ReportManager(self.storage)
             report_manager.generate_stage3(run, run_dir, None, quark_report)
             raise
@@ -89,7 +89,7 @@ class Stage3QuarkRunner:
         log: Callable[[str], None],
         ctx: RunContext | None = None,
     ) -> QuarkReport:
-        emit_progress(self.on_progress, "Running Quark rules directory...")
+        emit_progress(self.on_progress, "Выполняются правила Quark...")
         rules_dir = Path(self.config.quark_rules_dir) if self.config.quark_rules_dir else None
         quark_config = QuarkConfig(
             rules_dir=rules_dir,
@@ -105,11 +105,11 @@ class Stage3QuarkRunner:
             ctx=ctx,
         )
         if report.status != "ok":
-            log(f"Quark analysis status: {report.status}")
+            log(f"Статус анализа Quark: {report.status}")
         return report
 
     def _quark_failure_message(self, report: QuarkReport) -> str:
-        base = f"Quark analysis status: {report.status}"
+        base = f"Статус анализа Quark: {report.status}"
         details = [item.strip() for item in (report.errors or []) if isinstance(item, str) and item.strip()]
         if not details:
             return base

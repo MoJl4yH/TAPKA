@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import re
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from secrets import token_hex
@@ -176,20 +178,32 @@ def docker_run(
     container_name: str = MOBSF_CONTAINER_NAME,
 ) -> str:
     host_port = _host_port(base_url)
-    result = _run_docker(
-        [
-            "docker",
-            "run",
-            "-d",
-            "--name",
-            container_name,
-            "-p",
-            f"{host_port}:8000",
-            "-e",
-            f"MOBSF_API_KEY={api_key}",
-            image,
-        ],
-    )
+    env_file = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".env", delete=False) as f:
+            f.write(f"MOBSF_API_KEY={api_key}\n")
+            env_file = f.name
+        os.chmod(env_file, 0o600)
+        result = _run_docker(
+            [
+                "docker",
+                "run",
+                "-d",
+                "--name",
+                container_name,
+                "-p",
+                f"{host_port}:8000",
+                "--env-file",
+                env_file,
+                image,
+            ],
+        )
+    finally:
+        if env_file:
+            try:
+                os.unlink(env_file)
+            except OSError:
+                pass
     if result.returncode != 0:
         stderr = result.stderr.strip() or "docker run failed"
         raise RuntimeError(stderr)

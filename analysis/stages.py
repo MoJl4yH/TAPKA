@@ -4,8 +4,8 @@ STAGE_CROSS_TOOL = "stage3_cross_tool"
 STAGE_OVERALL = "overall_report"
 
 STAGES = [
-    (STAGE_STATIC, "Static analysis"),
-    (STAGE_DYNAMIC, "Dynamic analysis"),
-    (STAGE_CROSS_TOOL, "Cross-tool analysis"),
-    (STAGE_OVERALL, "Overall report"),
+    (STAGE_STATIC, "Статический анализ"),
+    (STAGE_DYNAMIC, "Динамический анализ"),
+    (STAGE_CROSS_TOOL, "Кросс-инструментальный анализ"),
+    (STAGE_OVERALL, "Сводный отчёт"),
 ]

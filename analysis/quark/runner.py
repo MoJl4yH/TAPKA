@@ -22,6 +22,16 @@ DEFAULT_SOURCE_RULES_DIR = Path.home() / ".quark-engine" / "quark-rules"
 QUARK_COMMAND = "quark"
 
 
+def _quark_is_matched(crime: dict) -> bool:
+    """Module-level helper: a rule is considered matched if confidence >= 60% or score > 0."""
+    conf_str = crime.get("confidence", "0%")
+    try:
+        conf_val = int(conf_str.replace("%", ""))
+    except (ValueError, AttributeError):
+        conf_val = 0
+    return conf_val >= 60 or crime.get("score", 0) > 0
+
+
 @dataclass
 class QuarkConfig:
     rules_dir: Path | None = None
@@ -477,12 +487,7 @@ class QuarkRunner:
     @staticmethod
     def _is_matched(crime: dict) -> bool:
         """A rule is considered matched if confidence >= 60% or score > 0."""
-        conf_str = crime.get("confidence", "0%")
-        try:
-            conf_val = int(conf_str.replace("%", ""))
-        except (ValueError, AttributeError):
-            conf_val = 0
-        return conf_val >= 60 or crime.get("score", 0) > 0
+        return _quark_is_matched(crime)
 
     @staticmethod
     def _compute_threat_level(total_score: float) -> str:

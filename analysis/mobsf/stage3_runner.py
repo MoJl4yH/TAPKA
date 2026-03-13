@@ -4,7 +4,6 @@ import json
 import os
 import zipfile
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -40,7 +39,7 @@ from analysis.models.mobsf import (
 )
 from analysis.models.quark import QuarkReport
 from analysis.reporting import ReportManager
-from analysis.settings import load_settings
+from analysis.settings import load_settings, get_mobsf_api_key
 from analysis.storage import Storage
 from models import Run
 
@@ -100,9 +99,9 @@ class Stage3MobSFRunner:
             quark_dir = run_dir / "artifacts" / "quark"
             quark_dir.mkdir(parents=True, exist_ok=True)
 
-        start_time = datetime.now().isoformat(timespec="seconds")
-        log("Stage3 MobSF run started.")
-        emit_progress(self.on_progress, "Starting MobSF Stage3 analysis...")
+        start_time = now_utc_iso()
+        log("Запущен анализ MobSF на этапе 3.")
+        emit_progress(self.on_progress, "Запуск анализа MobSF для этапа 3...")
 
         mobsf_report = None
         quark_report = None
@@ -110,7 +109,7 @@ class Stage3MobSFRunner:
             base_url, api_key = self._resolve_mobsf_settings()
             client = MobSFClient(base_url, api_key)
 
-            self._emit("Checking MobSF availability...")
+            self._emit("Проверка доступности MobSF...")
             self._check_available(client)
 
             ensure_apk_ready(apk_path)
@@ -150,7 +149,7 @@ class Stage3MobSFRunner:
                 quark_report = self._run_quark(apk_path, quark_dir, run_dir, log, ctx=ctx)
 
             run.status = "Done"
-            run.finished_at = datetime.now().isoformat(timespec="seconds")
+            run.finished_at = now_utc_iso()
 
             mobsf_report = self._build_report(
                 base_url,
@@ -164,13 +163,13 @@ class Stage3MobSFRunner:
             report_manager = ReportManager(self.storage)
             _, html_path = report_manager.generate_stage3(run, run_dir, mobsf_report, quark_report)
             run.report_path = str(html_path)
-            log("Stage3 MobSF run completed.")
+            log("Анализ MobSF на этапе 3 завершён.")
             return run
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            log(f"Stage3 MobSF run failed: {exc}")
+            log(f"Анализ MobSF на этапе 3 завершился ошибкой: {exc}")
             run.status = "Error"
-            run.finished_at = datetime.now().isoformat(timespec="seconds")
-            append_run_error(run, f"Stage3 MobSF failed: {exc}")
+            run.finished_at = now_utc_iso()
+            append_run_error(run, f"MobSF на этапе 3 завершился ошибкой: {exc}")
             report = self._build_error_report(start_time)
             report_manager = ReportManager(self.storage)
             report_manager.generate_stage3(run, run_dir, report, None)
@@ -273,13 +272,13 @@ class Stage3MobSFRunner:
         artifacts = MobSFArtifacts()
         static_summary = MobSFStaticSummary()
         dynamic_summary = MobSFDynamicAndroidSummary(enabled=self.config.enable_dynamic_android)
-        ios_summary = MobSFIosSummary(enabled=self.config.enable_ios, status="Not configured")
+        ios_summary = MobSFIosSummary(enabled=self.config.enable_ios, status="Не настроено")
         static_artifacts = dict(artifacts.static) if isinstance(artifacts.static, dict) else {}
         dynamic_android_artifacts = (
             dict(artifacts.dynamic_android) if isinstance(artifacts.dynamic_android, dict) else {}
         )
 
-        self._emit("Uploading APK to MobSF...")
+        self._emit("Загрузка APK в MobSF...")
         upload_resp = self._call_and_save_json(
             lambda: client.upload(str(apk_path), filename=apk_display_name),
             static_dir / "upload.json",
@@ -294,10 +293,10 @@ class Stage3MobSFRunner:
         static_artifacts["upload"] = self._relpath(run_dir, static_dir / "upload.json")
 
         if not scan_hash:
-            raise RuntimeError("MobSF upload did not return a scan hash.")
+            raise RuntimeError("MobSF не вернул хэш сканирования после загрузки файла.")
 
-        self._emit("Starting MobSF static scan...")
-        self._emit_scan_status("Scan started")
+        self._emit("Запуск статического анализа MobSF...")
+        self._emit_scan_status("Сканирование запущено")
         self._call_and_save_json(
             lambda: client.scan(scan_hash),
             static_dir / "scan.json",
@@ -306,7 +305,7 @@ class Stage3MobSFRunner:
         )
         static_artifacts["scan"] = self._relpath(run_dir, static_dir / "scan.json")
 
-        self._emit("Fetching MobSF scan logs...")
+        self._emit("Получение журналов сканирования MobSF...")
         scan_logs_resp = self._call_and_save_text(
             lambda: client.scan_logs(scan_hash),
             static_dir / "scan_logs.txt",
@@ -318,7 +317,7 @@ class Stage3MobSFRunner:
             self._emit_scan_status(scan_status)
         static_artifacts["scan_logs"] = self._relpath(run_dir, static_dir / "scan_logs.txt")
 
-        self._emit("Fetching MobSF static report JSON...")
+        self._emit("Получение JSON-отчёта статического анализа MobSF...")
         report_resp = self._call_and_save_json(
             lambda: client.report_json(scan_hash),
             static_dir / "report.json",
@@ -327,9 +326,9 @@ class Stage3MobSFRunner:
         )
         static_artifacts["report_json"] = self._relpath(run_dir, static_dir / "report.json")
         static_summary = self._extract_static_summary(report_resp.json_data, static_summary)
-        self._emit_scan_status("Scan completed")
+        self._emit_scan_status("Сканирование завершено")
 
-        self._emit("Fetching MobSF scorecard...")
+        self._emit("Получение сводной оценки MobSF...")
         scorecard_resp = self._call_and_save_json(
             lambda: client.scorecard(scan_hash),
             static_dir / "scorecard.json",
@@ -340,14 +339,14 @@ class Stage3MobSFRunner:
         static_summary.scorecard = scorecard_resp.json_data or {}
 
         if self.config.download_pdf:
-            self._emit("Downloading MobSF PDF report...")
+            self._emit("Загрузка PDF-отчёта MobSF...")
             pdf_path = static_dir / "report.pdf"
             pdf_response = client.download_pdf(scan_hash)
             self._write_trace(trace_dir, "static_download_pdf", pdf_response.status_code)
             if pdf_response.status_code >= 400:
                 snippet = self._short_text(pdf_response.text)
                 raise MobSFClientError(
-                    f"MobSF API error (HTTP {pdf_response.status_code}) during PDF download: {snippet}"
+                    f"Ошибка API MobSF (HTTP {pdf_response.status_code}) при загрузке PDF: {snippet}"
                 )
             self._write_binary(pdf_path, pdf_response.content)
             static_artifacts["report_pdf"] = self._relpath(run_dir, pdf_path)
@@ -356,7 +355,7 @@ class Stage3MobSFRunner:
             view_dir = static_dir / "view_source"
             view_dir.mkdir(parents=True, exist_ok=True)
             for file_path, source_type in self.config.view_source_files:
-                self._emit(f"Fetching source: {file_path}")
+                self._emit(f"Получение исходного файла: {file_path}")
                 self._call_and_save_json(
                     lambda fp=file_path, st=source_type: client.view_source(scan_hash, fp, st),
                     view_dir / f"{self._safe_name(file_path)}.json",
@@ -365,7 +364,7 @@ class Stage3MobSFRunner:
                 )
             static_artifacts["view_source"] = self._relpath(run_dir, view_dir)
         elif self.config.view_source:
-            log("View source enabled but no files configured.")
+            log("Режим просмотра исходников включён, но список файлов не задан.")
 
         if self.config.enable_dynamic_android:
             dynamic_summary, dynamic_artifacts = self._run_dynamic_android(
@@ -380,7 +379,7 @@ class Stage3MobSFRunner:
             dynamic_android_artifacts.update(dynamic_artifacts)
 
         if self.config.cleanup_scans:
-            self._emit("Cleaning up MobSF scan...")
+            self._emit("Очистка данных сканирования MobSF...")
             self._call_and_save_json(
                 lambda: client.delete_scan(scan_hash),
                 static_dir / "delete_scan.json",
@@ -405,7 +404,7 @@ class Stage3MobSFRunner:
         summary: MobSFDynamicAndroidSummary,
     ) -> tuple[MobSFDynamicAndroidSummary, dict[str, str]]:
         artifacts: dict[str, str] = {}
-        self._emit("Starting MobSF dynamic analysis...")
+        self._emit("Запуск динамического анализа MobSF...")
         start_resp = self._call_and_save_json(
             lambda: client.dynamic_start_analysis(scan_hash),
             dynamic_dir / "start.json",
@@ -420,7 +419,7 @@ class Stage3MobSFRunner:
             package_name = start_resp.json_data.get("package")
 
         if package_name:
-            self._emit("Collecting logcat...")
+            self._emit("Сбор logcat...")
             self._call_and_save_text(
                 lambda: client.android_logcat(package_name),
                 dynamic_dir / "logcat.txt",
@@ -431,7 +430,7 @@ class Stage3MobSFRunner:
             artifacts["logcat"] = self._relpath(run_dir, dynamic_dir / "logcat.txt")
 
         if self.config.tls_tests:
-            self._emit("Running TLS tests...")
+            self._emit("Выполнение TLS-проверок...")
             tls_resp = self._call_and_save_json(
                 lambda: client.android_tls_tests(scan_hash),
                 dynamic_dir / "tls_tests.json",
@@ -445,7 +444,7 @@ class Stage3MobSFRunner:
         if self.config.frida_steps:
             frida_dir = dynamic_dir / "frida"
             frida_dir.mkdir(parents=True, exist_ok=True)
-            self._emit("Starting Frida instrumentation...")
+            self._emit("Запуск инструментирования Frida...")
             self._call_and_save_json(
                 lambda: client.frida_instrument(
                     scan_hash,
@@ -457,14 +456,14 @@ class Stage3MobSFRunner:
                 trace_dir,
                 "dynamic_frida_instrument",
             )
-            self._emit("Collecting Frida API monitor...")
+            self._emit("Сбор данных монитора API Frida...")
             self._call_and_save_json(
                 lambda: client.frida_api_monitor(scan_hash),
                 frida_dir / "api_monitor.json",
                 trace_dir,
                 "dynamic_frida_api_monitor",
             )
-            self._emit("Collecting Frida logs...")
+            self._emit("Сбор журналов Frida...")
             self._call_and_save_json(
                 lambda: client.frida_logs(scan_hash),
                 frida_dir / "logs.json",
@@ -473,7 +472,7 @@ class Stage3MobSFRunner:
             )
             artifacts["frida"] = self._relpath(run_dir, frida_dir)
 
-        self._emit("Stopping dynamic analysis...")
+        self._emit("Остановка динамического анализа...")
         self._call_and_save_json(
             lambda: client.dynamic_stop_analysis(scan_hash),
             dynamic_dir / "stop.json",
@@ -483,7 +482,7 @@ class Stage3MobSFRunner:
         summary.status = "stopped"
         artifacts["stop"] = self._relpath(run_dir, dynamic_dir / "stop.json")
 
-        self._emit("Fetching dynamic report JSON...")
+        self._emit("Получение JSON-отчёта динамического анализа...")
         self._call_and_save_json(
             lambda: client.dynamic_report_json(scan_hash),
             dynamic_dir / "report.json",
@@ -496,7 +495,7 @@ class Stage3MobSFRunner:
             view_dir = dynamic_dir / "view_source"
             view_dir.mkdir(parents=True, exist_ok=True)
             for file_path, file_type in self.config.dynamic_view_source_files:
-                self._emit(f"Fetching dynamic source: {file_path}")
+                self._emit(f"Получение динамического исходного файла: {file_path}")
                 self._call_and_save_json(
                     lambda fp=file_path, ft=file_type: client.dynamic_view_source(scan_hash, fp, ft),
                     view_dir / f"{self._safe_name(file_path)}.json",
@@ -517,9 +516,9 @@ class Stage3MobSFRunner:
     ) -> QuarkReport:
         if not self.config.enable_quark:
             report = QuarkReport(status="skipped")
-            self._append_quark_error(report, "Quark analysis disabled.")
+            self._append_quark_error(report, "Анализ Quark отключён.")
             return report
-        self._emit("Running Quark rules...")
+        self._emit("Выполнение правил Quark...")
         rules_dir = Path(self.config.quark_rules_dir) if self.config.quark_rules_dir else None
         quark_config = QuarkConfig(rules_dir=rules_dir, timeout_sec=self.config.quark_timeout_sec)
         runner = QuarkRunner(quark_config, on_progress=log)
@@ -530,7 +529,7 @@ class Stage3MobSFRunner:
             ctx=ctx,
         )
         if report.status != "ok":
-            log(f"Quark analysis status: {report.status}")
+            log(f"Статус анализа Quark: {report.status}")
         return report
 
 
@@ -559,7 +558,7 @@ class Stage3MobSFRunner:
         features = self._build_feature_flags()
         static_summary = MobSFStaticSummary()
         dynamic_summary = MobSFDynamicAndroidSummary(enabled=self.config.enable_dynamic_android)
-        ios_summary = MobSFIosSummary(enabled=self.config.enable_ios, status="Not configured")
+        ios_summary = MobSFIosSummary(enabled=self.config.enable_ios, status="Не настроено")
         artifacts = MobSFArtifacts()
         return MobSFReport(
             instance=instance,
@@ -574,7 +573,7 @@ class Stage3MobSFRunner:
         return MobSFInstanceInfo(
             base_url=base_url,
             started_at=started_at,
-            finished_at=datetime.now().isoformat(timespec="seconds"),
+            finished_at=now_utc_iso(),
         )
 
     def _build_feature_flags(self) -> MobSFFeatureFlags:
@@ -592,11 +591,11 @@ class Stage3MobSFRunner:
         try:
             response = client.scans(page=1, page_size=1)
         except requests.RequestException as exc:
-            raise MobSFClientError(f"MobSF is not reachable: {exc}") from exc
+            raise MobSFClientError(f"MobSF недоступен: {exc}") from exc
         if response.status_code >= 400:
             snippet = self._short_text(response.text)
             raise MobSFClientError(
-                f"MobSF is not available (HTTP {response.status_code}): {snippet}",
+                f"MobSF недоступен (HTTP {response.status_code}): {snippet}",
                 response=response,
             )
 
@@ -604,9 +603,9 @@ class Stage3MobSFRunner:
         settings = load_settings()
         mobsf = settings.get("mobsf", {})
         base_url = normalize_base_url(mobsf.get("url", DEFAULT_MOBSF_URL))
-        api_key = os.environ.get("MOBSF_API_KEY") or mobsf.get("api_key")
+        api_key = os.environ.get("MOBSF_API_KEY") or get_mobsf_api_key()
         if not api_key:
-            raise RuntimeError("MobSF API key is not configured (MOBSF_API_KEY).")
+            raise RuntimeError("API-ключ MobSF не настроен (MOBSF_API_KEY).")
         return base_url, api_key
 
     def _resolve_apk_display_name(self, project_id: str, apk_path: Path) -> str:
@@ -625,13 +624,13 @@ class Stage3MobSFRunner:
         ext = Path(display_name).suffix.lower()
         if ext not in supported_ext:
             raise RuntimeError(
-                "MobSF upload supports .apk, .zip, .ipa, .appx files. "
-                f"Got: {display_name}"
+                "MobSF поддерживает загрузку файлов .apk, .zip, .ipa и .appx. "
+                f"Получен файл: {display_name}"
             )
         if not zipfile.is_zipfile(apk_path):
-            raise RuntimeError(f"File is not a valid archive: {apk_path}")
+            raise RuntimeError(f"Файл не является корректным архивом: {apk_path}")
         size = apk_path.stat().st_size
-        log(f"Uploading {display_name} ({size} bytes).")
+        log(f"Загрузка {display_name} ({size} байт).")
 
     def _call_and_save_json(
         self,
@@ -662,13 +661,13 @@ class Stage3MobSFRunner:
             response = func()
         except requests.RequestException as exc:
             self._write_trace(trace_dir, trace_name, 0, note=str(exc))
-            raise MobSFClientError(f"MobSF request failed: {exc}") from exc
+            raise MobSFClientError(f"Ошибка запроса к MobSF: {exc}") from exc
         self._write_trace(trace_dir, trace_name, response.status_code, response.text)
         self._write_text(path, response.text)
         if response.status_code >= 400:
             snippet = self._short_text(response.text)
             raise MobSFClientError(
-                f"MobSF API error (HTTP {response.status_code}): {snippet}",
+                f"Ошибка API MobSF (HTTP {response.status_code}): {snippet}",
                 response=response,
             )
         return response
