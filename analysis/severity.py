@@ -37,6 +37,8 @@ class SeverityEngine:
         "ndv_bluetooth_enumeration": 2,
         "ndv_app_enumeration": 2,
         "ndv_proxy_bypass": 3,
+        "ndv_call_monitoring": 3,
+        "ndv_package_monitoring": 2,
         # --- sec_* ---
         "sec_tls_trust_all": 3,
         "sec_hostname_verifier_bypass": 3,

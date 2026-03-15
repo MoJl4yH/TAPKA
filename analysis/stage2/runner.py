@@ -506,8 +506,8 @@ class Stage2DynamicRunner:
             )
             if code == 0:
                 for line in out.splitlines():
-                    if pkg_name in line:
-                        # format: "package:com.foo uid:10209"
+                    # Exact match: "package:com.foo uid:10209" — avoid substring hits on com.foo.bar
+                    if line.startswith(f"package:{pkg_name} ") or line == f"package:{pkg_name}":
                         m = re.search(r"uid:(\d+)", line)
                         if m:
                             return m.group(1)

@@ -7,7 +7,7 @@ import time
 import traceback
 import zipfile
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, TextIO
 import xml.etree.ElementTree as ET
@@ -526,7 +526,7 @@ class Stage1StaticRunner:
         # --- Sensitive data logging ---
         {
             "category": "sec_log_sensitive_data",
-            "pattern": r"Log\.[dviwé]\([^)]*(?i)(password|passwd|token|secret|apikey|api_key|credential|ssn|credit.?card)",
+            "pattern": r"Log\.[dviwe]\([^)]*(?i)(password|passwd|token|secret|apikey|api_key|credential|ssn|credit.?card)",
             "targets": ("jadx",),
             "confidence": "C1",
             "evidence_type": "code",
@@ -1787,6 +1787,7 @@ class Stage1StaticRunner:
         self,
         application,
         ns: str,
+        target_sdk: int | None = None,
     ) -> tuple[bool, bool, bool, str | None, str | None, set[str]]:
         debuggable = False
         allow_backup = False
@@ -1804,7 +1805,12 @@ class Stage1StaticRunner:
                 foreground_types,
             )
         debuggable = (application.get(f"{ns}debuggable") or "false").lower() == "true"
-        allow_backup = (application.get(f"{ns}allowBackup") or "false").lower() == "true"
+        raw_backup = application.get(f"{ns}allowBackup")
+        if raw_backup is None:
+            # Android default: allowBackup=true for targetSdkVersion < 31 (API 31 = Android 12).
+            allow_backup = target_sdk is None or target_sdk < 31
+        else:
+            allow_backup = raw_backup.lower() == "true"
         uses_cleartext = (application.get(f"{ns}usesCleartextTraffic") or "false").lower() == "true"
         full_backup_content = application.get(f"{ns}fullBackupContent")
         network_security_config = application.get(f"{ns}networkSecurityConfig")
@@ -2200,7 +2206,7 @@ class Stage1StaticRunner:
             full_backup_content,
             network_security_config,
             foreground_types,
-        ) = self._manifest_app_flags(application, ns)
+        ) = self._manifest_app_flags(application, ns, target_sdk=target_sdk)
 
         if debuggable:
             self._add_manifest_finding(
@@ -2415,7 +2421,9 @@ class Stage1StaticRunner:
         for fmt in ("%a %b %d %H:%M:%S %Z %Y", "%a %b %d %H:%M:%S %Y"):
             try:
                 until = datetime.strptime(until_raw, fmt)
-                return until < datetime.now()
+                if until.tzinfo is None:
+                    until = until.replace(tzinfo=timezone.utc)
+                return until < datetime.now(timezone.utc)
             except ValueError:
                 continue
         return False
@@ -2699,7 +2707,7 @@ class Stage1StaticRunner:
         if not reflection:
             return findings
         if len(reflection) < 5:
-            return [f for f in findings if f.category != "ndv_reflection_heavy"]
+            return findings  # keep as-is; too few to aggregate but still worth reporting
         sample = reflection[0]
         aggregated = self._make_finding(
             FindingSpec(

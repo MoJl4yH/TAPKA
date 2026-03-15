@@ -20,6 +20,7 @@ DEFAULT_MOBSF_URL = "http://127.0.0.1:8000"
 API_DOCS_PATH = "/api_docs"
 API_KEY_RE = re.compile(r"API Key:\s*<strong><code>([a-f0-9]{64})</code>", re.IGNORECASE)
 LOG_API_KEY_RE = re.compile(r"api key[:\s]+([a-f0-9]{64})", re.IGNORECASE)
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,11 @@ def normalize_base_url(base_url: str) -> str:
         return DEFAULT_MOBSF_URL
     if "://" not in base_url:
         base_url = f"http://{base_url}"
+    parsed = urlparse(base_url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"Unsupported MobSF URL scheme: {parsed.scheme!r}. Only http/https are allowed.")
+    if not parsed.hostname:
+        raise ValueError("MobSF URL must include a hostname.")
     return base_url.rstrip("/")
 
 
@@ -60,7 +66,8 @@ def extract_api_key(html: str) -> str | None:
 
 
 def extract_api_key_from_logs(logs: str) -> str | None:
-    match = LOG_API_KEY_RE.search(logs or "")
+    clean = _ANSI_ESCAPE_RE.sub("", logs or "")
+    match = LOG_API_KEY_RE.search(clean)
     if not match:
         return None
     return match.group(1)

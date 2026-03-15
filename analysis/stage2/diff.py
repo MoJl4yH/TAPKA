@@ -77,6 +77,10 @@ class SnapshotDiff:
             if member.issym() or member.islnk() or member.isdev():
                 self._log(f"Skipping unsafe tar member: {member.name}")
                 continue
+            # Explicitly reject any path component equal to ".." before resolve() check.
+            if ".." in member.name.replace("\\", "/").split("/"):
+                self._log(f"Skipping path-traversal tar member: {member.name}")
+                continue
             member_path = (out_dir / member.name).resolve()
             if not str(member_path).startswith(str(resolved_out) + os.sep) and member_path != resolved_out:
                 self._log(f"Skipping path-traversal tar member: {member.name}")

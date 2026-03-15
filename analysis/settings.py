@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 
 DEFAULT_WORKSPACE = "~/tapka_workspace"
-SETTINGS_DIR = Path(__file__).resolve().parents[1] / ".tapka"
+SETTINGS_DIR = Path(os.path.expanduser("~")) / ".tapka"
 SETTINGS_FILE = SETTINGS_DIR / "settings.json"
 _MOBSF_API_KEY_FILE = SETTINGS_DIR / ".mobsf_api_key"
 
