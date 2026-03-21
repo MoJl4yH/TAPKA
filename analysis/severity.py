@@ -59,6 +59,7 @@ class SeverityEngine:
         "sec_network_security_config_weak": 3,
         "sec_certificate_pinning": 0,
         "sec_cleartext_http_endpoint": 3,
+        "sec_keyboard_cache_sensitive": 2,  # BUG-29
         "secret_hardcoded_credentials": 4,
         "sec_broadcast_receiver_no_permission": 3,
         "sec_intent_extra_read": 1,
@@ -103,6 +104,11 @@ class SeverityEngine:
         "supplychain_signature_scheme_v1_only": 2,
         "supplychain_debug_certificate": 4,
         "supplychain_cert_expired": 3,
+        # --- checksec_* ---
+        "checksec_nx_disabled": 4,
+        "checksec_no_canary": 3,
+        "checksec_no_pie": 2,
+        "checksec_no_relro": 2,
     }
 
     thresholds = {"high": 3.5, "medium": 2.0, "low": 1.0}

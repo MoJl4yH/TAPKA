@@ -1,0 +1,71 @@
+rules:
+  - id: tapka-dynamic-code-loading
+    patterns:
+      - pattern: new DexClassLoader(...)
+    message: >
+      Dynamic code loading via DexClassLoader detected.
+      tapka_category=ndv_dynamic_code_loading_dex
+    languages: [java]
+    severity: WARNING
+    metadata:
+      tapka_category: ndv_dynamic_code_loading_dex
+      confidence: C2
+      description: App loads code from external path at runtime (DexClassLoader).
+
+  - id: tapka-exec-command
+    patterns:
+      - pattern: Runtime.getRuntime().exec(...)
+    message: >
+      Command execution via Runtime.exec detected.
+      tapka_category=ndv_remote_command_shell
+    languages: [java]
+    severity: WARNING
+    metadata:
+      tapka_category: ndv_remote_command_shell
+      confidence: C2
+      description: App executes shell commands via Runtime.getRuntime().exec().
+
+  - id: tapka-reflection-heavy
+    patterns:
+      - pattern: Class.forName($CLASS).getMethod(...)
+    message: >
+      Heavy reflection usage detected.
+      tapka_category=ndv_reflection_heavy
+    languages: [java]
+    severity: INFO
+    metadata:
+      tapka_category: ndv_reflection_heavy
+      confidence: C1
+      description: App uses Class.forName().getMethod() reflection chain.
+
+  - id: tapka-accessibility-service
+    patterns:
+      - pattern: |
+          class $NAME extends AccessibilityService {
+            ...
+          }
+    message: >
+      AccessibilityService implementation detected.
+      tapka_category=ndv_accessibility_surveillance
+    languages: [java]
+    severity: WARNING
+    metadata:
+      tapka_category: ndv_accessibility_surveillance
+      confidence: C3
+      description: App implements AccessibilityService — high-privilege surveillance capability.
+
+  - id: tapka-static-iv-crypto
+    patterns:
+      - pattern: new IvParameterSpec($IV)
+      - pattern-not: new IvParameterSpec(SecureRandom.getSeed(...))
+      - pattern-not: new IvParameterSpec($RNG.generateSeed(...))
+    message: >
+      Potentially static or hardcoded IV passed to IvParameterSpec.
+      Review to ensure IV is freshly generated per encryption operation.
+      tapka_category=sec_static_iv
+    languages: [java]
+    severity: WARNING
+    metadata:
+      tapka_category: sec_static_iv
+      confidence: C2
+      description: Hardcoded static IV breaks IND-CPA security for block cipher modes.

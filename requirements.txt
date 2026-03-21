@@ -1,6 +1,12 @@
 PySide6==6.8.1
 pydantic==2.8.0
-requests==2.32.3
+requests>=2.32.4
 quark-engine==26.1.1
 apkid==3.0.0
 apkleaks==2.6.3
+keyring>=25.0.0
+semgrep>=1.50.0
+rich>=14.0.0
+mitmproxy>=10.0.0
+# checksec-py несовместим с Python 3.13 (требует lief==0.11.0)
+# Используем системный `checksec` (Kali: apt install checksec) или pwntools

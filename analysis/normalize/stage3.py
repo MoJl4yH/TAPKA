@@ -200,22 +200,47 @@ def normalize_stage3(ctx: RunContext, mobsf_result: Any | None, quark_result: An
 
     apkleaks_path = ctx.run_dir / "tools" / "apkleaks" / "raw" / "apkleaks.json"
     if apkleaks_path.exists():
-        evidence = [
+        base_evidence = [
             EvidenceRef(
                 tool="apkleaks",
                 path=str(apkleaks_path.relative_to(ctx.run_dir)),
                 locator=None,
             )
         ]
-        _append_indicator(
-            items,
-            tool_counts,
-            "apkleaks",
-            "apkleaks_raw",
-            "APKLeaks output",
-            "apkleaks raw",
-            evidence,
-        )
+        # BUG-34: iterate per-rule per-match instead of single stub indicator
+        try:
+            raw_apkleaks = json.loads(apkleaks_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            raw_apkleaks = {}
+        added_apkleaks = 0
+        for group in (raw_apkleaks.get("results") or []):
+            rule_name = str(group.get("name") or "unknown")
+            for match_value in (group.get("matches") or []):
+                value = str(match_value).strip()
+                if not value:
+                    continue
+                _append_indicator(
+                    items,
+                    tool_counts,
+                    "apkleaks",
+                    "secret_leak",
+                    f"APKLeaks: {rule_name}",
+                    value,
+                    base_evidence,
+                    tags=[rule_name],
+                )
+                added_apkleaks += 1
+        if added_apkleaks == 0:
+            # file exists but empty or unrecognized — keep stub so tool_execution gate fires
+            _append_indicator(
+                items,
+                tool_counts,
+                "apkleaks",
+                "apkleaks_raw",
+                "APKLeaks output",
+                "apkleaks raw",
+                base_evidence,
+            )
 
     for tool_name in ("mobsf", "quark", "apkid", "apkleaks"):
         if tool_counts.get(tool_name, 0) == 0:

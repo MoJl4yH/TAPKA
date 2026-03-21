@@ -20,15 +20,16 @@ VENV_DIR="$SCRIPT_DIR/.venv"
 TAPKA_DIR="$SCRIPT_DIR/.tapka"
 QUARK_RULES_DIR="$TAPKA_DIR/quark-rules"
 QUARK_RULES_REPO="https://github.com/quark-engine/quark-rules"
-MOBSF_IMAGE="opensecurity/mobile-security-framework-mobsf:latest"
+MOBSF_UPSTREAM_IMAGE="opensecurity/mobile-security-framework-mobsf:latest"
+MOBSF_IMAGE="tapka/mobsf:latest"
 PYTHON_MIN="3.11"
 
 # Flags from CLI arguments
 SKIP_APT=0
 SKIP_MOBSF=0
 FORCE_VENV=0
-
 WITH_STAGE2=0
+UPDATE_MODE=0
 
 for arg in "$@"; do
     case "$arg" in
@@ -36,12 +37,14 @@ for arg in "$@"; do
         --skip-mobsf)  SKIP_MOBSF=1 ;;
         --force-venv)  FORCE_VENV=1 ;;
         --with-stage2) WITH_STAGE2=1 ;;
+        --update)      UPDATE_MODE=1 ;;
         --help|-h)
-            echo "Usage: $0 [--skip-apt] [--skip-mobsf] [--force-venv] [--with-stage2]"
+            echo "Usage: $0 [--skip-apt] [--skip-mobsf] [--force-venv] [--with-stage2] [--update]"
             echo "  --skip-apt    Skip system package installation via apt"
             echo "  --skip-mobsf  Skip MobSF Docker image download"
             echo "  --force-venv  Recreate .venv from scratch"
             echo "  --with-stage2 Install Android SDK, create AVD, and install Zeek for Stage 2"
+            echo "  --update      Upgrade all Python dependencies to latest versions"
             exit 0
             ;;
     esac
@@ -94,6 +97,9 @@ APT_PACKAGES=(
     docker.io
     # Git (for quark-rules)
     git
+    # P1/P2 tools
+    checksec                  # .so security analysis (NX/PIE/RELRO/canary)
+    openssl                   # subject_hash_old for mitmproxy CA cert naming
 )
 
 if [[ "$SKIP_APT" -eq 1 ]]; then
@@ -142,6 +148,14 @@ check_tool unzip
 check_tool grep
 check_tool git
 check_tool docker
+check_tool openssl
+
+# Soft checks for optional tools (warn, not fatal)
+if command -v checksec &>/dev/null; then
+    ok "checksec → $(command -v checksec)"
+else
+    warn "checksec not found (optional). .so security analysis will be limited."
+fi
 
 if [[ ${#MISSING_TOOLS[@]} -gt 0 ]]; then
     fail "Missing tools: ${MISSING_TOOLS[*]}"
@@ -181,9 +195,15 @@ if [[ ! -f "$REQUIREMENTS" ]]; then
     exit 1
 fi
 
-info "Installing from requirements.txt..."
-"$VENV_PIP" install --quiet -r "$REQUIREMENTS"
-ok "Python dependencies installed."
+if [[ "$UPDATE_MODE" -eq 1 ]]; then
+    info "Update mode: upgrading all packages..."
+    "$VENV_PIP" install --quiet --upgrade -r "$REQUIREMENTS"
+    ok "Python dependencies upgraded."
+else
+    info "Installing from requirements.txt..."
+    "$VENV_PIP" install --quiet -r "$REQUIREMENTS"
+    ok "Python dependencies installed."
+fi
 
 # Verify pip-installed CLI tools are available in venv
 VENV_BIN="$VENV_DIR/bin"
@@ -192,6 +212,15 @@ for cli in quark apkid apkleaks; do
         ok "$cli → $VENV_BIN/$cli"
     else
         warn "$cli not found in $VENV_BIN; installation may be incomplete."
+    fi
+done
+
+# Soft checks for pip-installed optional tools
+for cli in semgrep mitmdump; do
+    if [[ -f "$VENV_BIN/$cli" ]]; then
+        ok "$cli → $VENV_BIN/$cli"
+    else
+        warn "$cli not found in $VENV_BIN (optional, but recommended)"
     fi
 done
 
@@ -239,6 +268,40 @@ else
     MISSING_TOOLS+=("yara-rules")
 fi
 
+# --- 6b. checksec fallback ---------------------------------------------------
+if ! command -v checksec &>/dev/null; then
+    info "checksec not found in apt — trying GitHub fallback..."
+    if wget -q -O /tmp/checksec \
+        "https://raw.githubusercontent.com/slimm609/checksec.sh/main/checksec"; then
+        chmod +x /tmp/checksec
+        if sudo install /tmp/checksec /usr/local/bin/checksec 2>/dev/null; then
+            ok "checksec installed to /usr/local/bin/checksec"
+        else
+            warn "Could not install checksec system-wide. .so analysis will be limited."
+        fi
+        rm -f /tmp/checksec
+    else
+        warn "Could not download checksec. .so security analysis will be skipped."
+    fi
+fi
+
+# --- 6c. semgrep custom rules ------------------------------------------------
+step "semgrep custom rules"
+
+SEMGREP_CUSTOM_RULES="$SCRIPT_DIR/analysis/semgrep/rules/android_tapka.yaml"
+if [[ -f "$SEMGREP_CUSTOM_RULES" ]]; then
+    ok "semgrep custom rules: $SEMGREP_CUSTOM_RULES"
+else
+    warn "Custom semgrep rules not found: $SEMGREP_CUSTOM_RULES"
+fi
+
+if [[ -f "$VENV_BIN/semgrep" ]]; then
+    SEMGREP_VER=$("$VENV_BIN/semgrep" --version 2>/dev/null | head -1 || echo "unknown")
+    ok "semgrep installed: $SEMGREP_VER"
+else
+    warn "semgrep not found in venv (pip install semgrep>=1.50.0)"
+fi
+
 # --- 7. Docker group (for MobSF) ---------------------------------------------
 step "Docker (MobSF)"
 
@@ -257,14 +320,60 @@ else
     if [[ "$SKIP_MOBSF" -eq 1 ]]; then
         warn "Skipping MobSF image pull (--skip-mobsf)."
     else
-        if docker image inspect "$MOBSF_IMAGE" &>/dev/null 2>&1; then
-            ok "MobSF image already present: $MOBSF_IMAGE"
+        if docker image inspect "$MOBSF_UPSTREAM_IMAGE" &>/dev/null 2>&1; then
+            ok "MobSF upstream image already present: $MOBSF_UPSTREAM_IMAGE"
         else
             info "Pulling MobSF Docker image (~2.6 GB, may take some time)..."
-            if docker pull "$MOBSF_IMAGE"; then
-                ok "MobSF image pulled: $MOBSF_IMAGE"
+            if docker pull "$MOBSF_UPSTREAM_IMAGE"; then
+                ok "MobSF image pulled: $MOBSF_UPSTREAM_IMAGE"
             else
-                warn "Failed to pull MobSF image. Run manually: docker pull $MOBSF_IMAGE"
+                warn "Failed to pull MobSF image. Run manually: docker pull $MOBSF_UPSTREAM_IMAGE"
+            fi
+        fi
+
+        # Build TAPKA-patched image (bakes in Android API 30 /system compatibility fixes).
+        # Uses a one-line Dockerfile: FROM upstream + COPY patched environment.py.
+        _PATCH="$SCRIPT_DIR/analysis/mobsf/patches/environment.py"
+        _PATCH_DST="/home/mobsf/Mobile-Security-Framework-MobSF/mobsf/DynamicAnalyzer/views/android/environment.py"
+        if docker image inspect "$MOBSF_UPSTREAM_IMAGE" &>/dev/null 2>&1 && [[ -f "$_PATCH" ]]; then
+            if [[ "$UPDATE_MODE" -eq 1 ]] || ! docker image inspect "$MOBSF_IMAGE" &>/dev/null 2>&1; then
+                info "Building $MOBSF_IMAGE (API 30 /system patches)..."
+                _ctx=$(mktemp -d)
+                cp "$_PATCH" "$_ctx/environment.py"
+                # Patch frida_core.py: replace sys.stdin.read() with time.sleep(45).
+                # In Docker, sys.stdin=/dev/null → read() returns immediately → session unloads
+                # before hooks can capture any API calls.
+                _FRIDA_CORE_PATCH="${SCRIPT_DIR}/analysis/mobsf/patches/frida_core.py"
+                _FRIDA_CORE_DST="/home/mobsf/Mobile-Security-Framework-MobSF/mobsf/DynamicAnalyzer/views/android/frida_core.py"
+                if [[ -f "${_FRIDA_CORE_PATCH}" ]]; then
+                    cp "${_FRIDA_CORE_PATCH}" "$_ctx/frida_core.py"
+                    _FRIDA_CORE_CMD="COPY frida_core.py ${_FRIDA_CORE_DST}"
+                else
+                    _FRIDA_CORE_CMD=""
+                fi
+                # Pre-cache frida-server 16.6.6 so frida_setup() doesn't need internet at runtime.
+                _FRIDA_SERVER_CACHE="${SCRIPT_DIR}/analysis/mobsf/patches/frida-server-16.6.6-android-x86_64"
+                if [[ -f "${_FRIDA_SERVER_CACHE}" ]]; then
+                    cp "${_FRIDA_SERVER_CACHE}" "$_ctx/frida-server-16.6.6-android-x86_64"
+                    _FRIDA_COPY_CMD="COPY frida-server-16.6.6-android-x86_64 /home/mobsf/.MobSF/downloads/frida-server-16.6.6-android-x86_64"
+                else
+                    _FRIDA_COPY_CMD=""
+                fi
+                # frida 17+ marks Android API 30 emulators as "jailed" (NotSupportedError on spawn).
+                # Pinning to frida 16.x restores full access (no jailed restriction on userdebug builds).
+                cat > "$_ctx/Dockerfile" <<EOF
+FROM ${MOBSF_UPSTREAM_IMAGE}
+COPY environment.py ${_PATCH_DST}
+${_FRIDA_CORE_CMD}
+${_FRIDA_COPY_CMD}
+RUN pip install --quiet --no-cache-dir "frida==16.6.6" "frida-tools==12.5.1"
+EOF
+                docker build -q -t "$MOBSF_IMAGE" "$_ctx" \
+                    && ok "$MOBSF_IMAGE built." \
+                    || warn "$MOBSF_IMAGE build failed; runtime patching will be used as fallback."
+                rm -rf "$_ctx"
+            else
+                ok "$MOBSF_IMAGE already present."
             fi
         fi
     fi
@@ -273,22 +382,40 @@ fi
 # --- 8. Final import check ----------------------------------------------------
 step "Final Python environment check"
 
+# Check mitmproxy separately
+if [[ -f "$VENV_BIN/mitmdump" ]]; then
+    ok "mitmdump → $VENV_BIN/mitmdump"
+else
+    warn "mitmdump not found in venv. Stage 2 HTTPS interception unavailable."
+    info "Install: pip install mitmproxy>=10.0.0"
+fi
+
 IMPORT_CHECK=$("$VENV_PYTHON" - <<'EOF' 2>&1
 errors = []
+warnings = []
 for mod in ["PySide6", "pydantic", "requests"]:
     try:
         __import__(mod)
     except ImportError as e:
         errors.append(str(e))
+for mod in ["semgrep", "mitmproxy"]:
+    try:
+        __import__(mod)
+    except ImportError:
+        warnings.append(f"{mod} (optional)")
 if errors:
     print("FAIL: " + "; ".join(errors))
+elif warnings:
+    print("WARN: " + "; ".join(warnings))
 else:
     print("OK")
 EOF
 )
 
 if [[ "$IMPORT_CHECK" == "OK" ]]; then
-    ok "PySide6, pydantic, requests import check: OK"
+    ok "Import check: OK"
+elif [[ "$IMPORT_CHECK" == WARN:* ]]; then
+    warn "Import check: $IMPORT_CHECK"
 else
     fail "Import check failed: $IMPORT_CHECK"
     MISSING_TOOLS+=("python-imports")
@@ -368,12 +495,12 @@ if [[ "$WITH_STAGE2" -eq 1 ]]; then
         info "Accepting Android SDK licenses..."
         yes | sdkmanager --licenses >/dev/null 2>&1 || true
 
-        info "Installing platform-tools, emulator, android-35 system image..."
+        info "Installing platform-tools, emulator, android-30 system image..."
         sdkmanager \
             "platform-tools" \
             "emulator" \
-            "platforms;android-35" \
-            "system-images;android-35;google_apis;x86_64" \
+            "platforms;android-30" \
+            "system-images;android-30;google_apis;x86_64" \
             && ok "Android SDK components installed." \
             || { fail "sdkmanager install failed."; MISSING_TOOLS+=("android-sdk-components"); }
     else
@@ -383,16 +510,16 @@ if [[ "$WITH_STAGE2" -eq 1 ]]; then
 
     # 10.4 Create AVD if it does not exist
     if command -v avdmanager &>/dev/null && command -v emulator &>/dev/null; then
-        if emulator -list-avds 2>/dev/null | grep -q "tapka_api35"; then
-            ok "AVD 'tapka_api35' already exists."
+        if emulator -list-avds 2>/dev/null | grep -q "tapka_api30"; then
+            ok "AVD 'tapka_api30' already exists."
         else
-            info "Creating AVD 'tapka_api35'..."
+            info "Creating AVD 'tapka_api30'..."
             echo "no" | avdmanager create avd \
-                -n tapka_api35 \
-                -k "system-images;android-35;google_apis;x86_64" \
+                -n tapka_api30 \
+                -k "system-images;android-30;google_apis;x86_64" \
                 --device "pixel_5" \
-                && ok "AVD 'tapka_api35' created." \
-                || { fail "Failed to create AVD."; MISSING_TOOLS+=("avd-tapka_api35"); }
+                && ok "AVD 'tapka_api30' created." \
+                || { fail "Failed to create AVD."; MISSING_TOOLS+=("avd-tapka_api30"); }
         fi
     else
         warn "avdmanager or emulator not found; skipping AVD creation."

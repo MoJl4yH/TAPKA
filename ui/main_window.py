@@ -11,6 +11,7 @@ from typing import Callable
 from PySide6.QtCore import Qt, QUrl, QThread, Signal, QTimer, QSize, QPointF, QRectF
 from PySide6.QtGui import QDesktopServices, QPixmap, QIcon, QPainter, QPen, QBrush, QColor, QPolygonF
 from PySide6.QtWidgets import (
+    QApplication,
     QMainWindow,
     QWidget,
     QVBoxLayout,
@@ -89,9 +90,27 @@ class MobSFSetupWorker(QThread):
         self.base_url = base_url
         self.api_key = api_key
 
+    @staticmethod
+    def _detect_emulator() -> str:
+        import subprocess  # noqa: PLC0415
+        try:
+            r = subprocess.run(["adb", "devices"], capture_output=True, text=True, timeout=10)
+            for line in r.stdout.splitlines()[1:]:
+                parts = line.split()
+                if len(parts) >= 2 and parts[1] == "device":
+                    return parts[0]
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+        return "emulator-5554"
+
     def run(self) -> None:
         try:
-            result = ensure_mobsf_ready(self.base_url, api_key=self.api_key, log=self.progress.emit)
+            emulator_id = self._detect_emulator()
+            result = ensure_mobsf_ready(
+                self.base_url, api_key=self.api_key,
+                emulator_id=emulator_id,
+                log=self.progress.emit,
+            )
             self.finished.emit(result)
         except Exception:  # pylint: disable=broad-exception-caught
             self.failed.emit(traceback.format_exc())
@@ -210,6 +229,34 @@ class Stage3BatchWorker(QThread):
             self.failed.emit(traceback.format_exc())
 
 
+class FullPipelineWorker(QThread):
+    """Запускает полный pipeline (Stage1→Stage2→Stage3) в фоне."""
+    finished = Signal(object)   # PipelineResult
+    failed = Signal(str)
+    progress = Signal(str)
+
+    def __init__(self, storage, project_id: str, config):
+        super().__init__()
+        self._storage = storage
+        self._project_id = project_id
+        self._config = config
+
+    def run(self) -> None:
+        import traceback as _tb
+        from analysis.pipeline import run_full_pipeline
+        try:
+            result = run_full_pipeline(
+                apk_path=self._storage.get_apk_path(self._project_id),
+                storage=self._storage,
+                config=self._config,
+                on_progress=self.progress.emit,
+                project_id=self._project_id,
+            )
+            self.finished.emit(result)
+        except Exception:
+            self.failed.emit(_tb.format_exc())
+
+
 class Stage2Worker(QThread):
     finished = Signal(object)
     failed = Signal(str)
@@ -240,6 +287,8 @@ class MainWindow(QMainWindow):
         ("rg", "Сканирование шаблонов"),
         ("strings", "Строки нативных библиотек"),
         ("yara", "YARA-сканирование"),
+        ("semgrep", "Semgrep-сканирование"),
+        ("checksec", "Анализ .so библиотек"),
     ]
     SEVERITY_ORDER = ["Высокий", "Средний", "Низкий", "Справочно"]
     CATEGORY_TITLE = {
@@ -293,7 +342,7 @@ class MainWindow(QMainWindow):
         "Refresh AVD list": "Обновить список AVD",
         "Capture duration:": "Длительность захвата:",
         "How long the app runs inside the emulator (in seconds) while logcat and network traffic are being captured.": "Сколько секунд приложение будет выполняться в эмуляторе, пока фиксируются logcat и сетевой трафик.",
-        "Run Dynamic Analysis": "Запустить динамический анализ",
+        "Run Dynamic Analysis": "Запустить анализ",
         "Open report": "Открыть отчёт",
         "Progress log": "Журнал выполнения",
         "No project selected.": "Проект не выбран.",
@@ -446,6 +495,12 @@ class MainWindow(QMainWindow):
         self.apkid_run_worker: Stage3ApkidWorker | None = None
         self.apkleaks_run_worker: Stage3ApkleaksWorker | None = None
         self.mobsf_setup_in_progress = False
+        self.pipeline_worker: object | None = None
+        self.pipeline_running: bool = False
+        self.pipeline_run_button: QPushButton | None = None
+        self.pipeline_progress_bar: object | None = None
+        self.pipeline_stage_label: QLabel | None = None
+        self.pipeline_log_view: object | None = None
         self.batch_run_in_progress = False
         self.batch_run_worker: Stage3BatchWorker | None = None
         self.mobsf_run_in_progress = False
@@ -534,6 +589,17 @@ class MainWindow(QMainWindow):
         self.stage3_log_paths: dict[str, Path] = {}
         self.stage3_run_dir: Path | None = None
         self.stage3_run_data: dict | None = None
+
+        # Security Score
+        self.security_score_label: QLabel | None = None
+        self.security_score_detail: QLabel | None = None
+        self.overall_score_label: QLabel | None = None
+        self.overall_risk_label: QLabel | None = None
+        self.overall_breakdown_label: QLabel | None = None
+        self.export_report_button: QPushButton | None = None
+        self.stage1_score_label: QLabel | None = None
+        self.stage2_score_label: QLabel | None = None
+        self.stage3_score_label: QLabel | None = None
 
         self.setWindowTitle(self._tr("TAPKA — Tools for APK analysis"))
         self.setMinimumSize(1100, 720)
@@ -806,6 +872,12 @@ class MainWindow(QMainWindow):
         project_layout.addWidget(QLabel("Last run"), 3, 2)
         project_layout.addWidget(self.project_run_label, 3, 3)
 
+        # Security Score labels (not shown in project card — shown in overall tab)
+        self.security_score_label = QLabel("-")
+        self.security_score_label.setObjectName("securityScoreLabel")
+        self.security_score_detail = QLabel("")
+        self.security_score_detail.setObjectName("muted")
+
         project_layout.setColumnStretch(1, 1)
         project_layout.setColumnStretch(3, 1)
         project_layout.setColumnMinimumWidth(1, 0)
@@ -827,9 +899,7 @@ class MainWindow(QMainWindow):
             STAGES[2][1],
         )
         self.stage_tabs.addTab(
-            self._build_stub_stage_page(
-                "Сводный отчёт будет доступен в одном из следующих обновлений.",
-            ),
+            self._build_overall_page(),
             STAGES[3][1],
         )
 
@@ -946,7 +1016,7 @@ class MainWindow(QMainWindow):
         dur_row.addWidget(dur_label)
         self.stage2_duration_spin = QSpinBox()
         self.stage2_duration_spin.setRange(10, 600)
-        self.stage2_duration_spin.setValue(60)
+        self.stage2_duration_spin.setValue(180)
         self.stage2_duration_spin.setSuffix(" с")
         self.stage2_duration_spin.setToolTip(
             "Сколько секунд приложение будет выполняться в эмуляторе, "
@@ -957,6 +1027,26 @@ class MainWindow(QMainWindow):
         config_layout.addLayout(dur_row)
 
         self._refresh_avd_list()
+
+        # HTTPS interception checkbox (mitmproxy)
+        self.stage2_mitm_check = QCheckBox("Перехват HTTPS (mitmproxy)")
+        self.stage2_mitm_check.setChecked(True)
+        self.stage2_mitm_check.setToolTip(
+            "Установить mitmproxy CA на эмулятор и перехватывать HTTPS-трафик.\n"
+            "Требует: mitmproxy установлен (pip install mitmproxy), "
+            "эмулятор запущен с -writable-system."
+        )
+        config_layout.addWidget(self.stage2_mitm_check)
+
+        mitm_port_row = QHBoxLayout()
+        mitm_port_row.addWidget(QLabel("Порт mitmproxy:"))
+        self.stage2_mitm_port_spin = QSpinBox()
+        self.stage2_mitm_port_spin.setRange(1024, 65535)
+        self.stage2_mitm_port_spin.setValue(8888)
+        self.stage2_mitm_port_spin.setFixedWidth(80)
+        mitm_port_row.addWidget(self.stage2_mitm_port_spin)
+        mitm_port_row.addStretch()
+        config_layout.addLayout(mitm_port_row)
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(10)
@@ -1049,10 +1139,16 @@ class MainWindow(QMainWindow):
         self.stage2_progress_bar.setValue(0)
         self.stage2_progress_label.setText("Запуск…")
 
-        avd_name = self.stage2_avd_combo.currentText().strip() if hasattr(self, "stage2_avd_combo") else "tapka_api35"
+        avd_name = self.stage2_avd_combo.currentText().strip() if hasattr(self, "stage2_avd_combo") else "tapka_api30"
+        mitm_enabled = (
+            hasattr(self, "stage2_mitm_check") and self.stage2_mitm_check.isChecked()
+        )
+        mitm_port = self.stage2_mitm_port_spin.value() if hasattr(self, "stage2_mitm_port_spin") else 8888
         config = Stage2Config(
-            avd_name=avd_name or "tapka_api35",
+            avd_name=avd_name or "tapka_api30",
             runtime_duration_sec=self.stage2_duration_spin.value(),
+            enable_https_interception=mitm_enabled,
+            mitm_port=mitm_port,
         )
         self.stage2_worker = Stage2Worker(self.storage, self.current_project.project_id, config)
         self.stage2_worker.progress.connect(self._on_stage2_progress)
@@ -1077,11 +1173,11 @@ class MainWindow(QMainWindow):
             if idx >= 0:
                 self.stage2_avd_combo.setCurrentIndex(idx)
             else:
-                idx = self.stage2_avd_combo.findText("tapka_api35")
+                idx = self.stage2_avd_combo.findText("tapka_api30")
                 if idx >= 0:
                     self.stage2_avd_combo.setCurrentIndex(idx)
         else:
-            self.stage2_avd_combo.addItem("tapka_api35")
+            self.stage2_avd_combo.addItem("tapka_api30")
             self.stage2_avd_combo.setToolTip("AVD не найдены. Выполните: ./setup.sh --with-stage2")
 
     def _update_stage2_elapsed(self) -> None:
@@ -1137,6 +1233,7 @@ class MainWindow(QMainWindow):
             self.stage2_progress_label.setText(f"Выполнено — {elapsed}")
         if hasattr(self, "stage2_log_view") and self.stage2_log_view:
             self.stage2_log_view.appendPlainText("Динамический анализ завершён.")
+        self._refresh_security_score()
 
     def _on_stage2_failed(self, error: str) -> None:
         self.stage2_timer.stop()
@@ -1222,6 +1319,18 @@ class MainWindow(QMainWindow):
         hint.setObjectName("muted")
         hint.setWordWrap(True)
         card_layout.addWidget(hint)
+
+        skip_row = QHBoxLayout()
+        skip_row.setSpacing(12)
+        self.batch_skip_mobsf_check = QCheckBox("Пропустить MobSF")
+        self.batch_skip_quark_check = QCheckBox("Пропустить Quark")
+        self.batch_skip_apkid_check = QCheckBox("Пропустить APKiD")
+        self.batch_skip_apkleaks_check = QCheckBox("Пропустить APKLeaks")
+        for cb in (self.batch_skip_mobsf_check, self.batch_skip_quark_check,
+                   self.batch_skip_apkid_check, self.batch_skip_apkleaks_check):
+            skip_row.addWidget(cb)
+        skip_row.addStretch()
+        card_layout.addLayout(skip_row)
 
         button_row = QHBoxLayout()
         self.batch_run_button = QPushButton("Запустить все")
@@ -1472,10 +1581,6 @@ class MainWindow(QMainWindow):
         self.mobsf_stop_button.clicked.connect(self._stop_mobsf)
         button_row.addWidget(self.mobsf_stop_button)
 
-        self.mobsf_run_button = QPushButton("Run MobSF")
-        self.mobsf_run_button.clicked.connect(self._run_mobsf_analysis)
-        button_row.addWidget(self.mobsf_run_button)
-
         self.mobsf_open_report_button = QPushButton("Open MobSF report")
         self.mobsf_open_report_button.clicked.connect(self._open_stage3_report)
         button_row.addWidget(self.mobsf_open_report_button)
@@ -1686,6 +1791,361 @@ class MainWindow(QMainWindow):
         layout.addStretch()
         return page
 
+    def _build_overall_page(self) -> QWidget:
+        """Сводная вкладка: Security Score + экспорт объединённого отчёта."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(12)
+
+        # ── Top row: Score card (left, compact) + Export card (right) ─────────
+        top_row = QHBoxLayout()
+        top_row.setSpacing(12)
+
+        # Score card — compact
+        score_card = QFrame()
+        score_card.setObjectName("card")
+        score_card.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        score_layout = QVBoxLayout(score_card)
+        score_layout.setContentsMargins(12, 10, 12, 10)
+        score_layout.setSpacing(4)
+
+        score_header = QLabel("Security Score")
+        score_header.setObjectName("sectionTitle")
+        score_layout.addWidget(score_header)
+
+        self.overall_score_label = QLabel("—")
+        self.overall_score_label.setObjectName("securityScoreBig")
+        score_layout.addWidget(self.overall_score_label)
+
+        self.overall_risk_label = QLabel("")
+        self.overall_risk_label.setObjectName("muted")
+        score_layout.addWidget(self.overall_risk_label)
+
+        self.overall_breakdown_label = QLabel("")
+        self.overall_breakdown_label.setObjectName("muted")
+        self.overall_breakdown_label.setWordWrap(True)
+        score_layout.addWidget(self.overall_breakdown_label)
+
+        self.stage1_score_label = QLabel("Stage1: N/A")
+        self.stage1_score_label.setObjectName("muted")
+        score_layout.addWidget(self.stage1_score_label)
+
+        self.stage2_score_label = QLabel("Stage2: N/A")
+        self.stage2_score_label.setObjectName("muted")
+        score_layout.addWidget(self.stage2_score_label)
+
+        self.stage3_score_label = QLabel("Stage3: N/A")
+        self.stage3_score_label.setObjectName("muted")
+        score_layout.addWidget(self.stage3_score_label)
+
+        top_row.addWidget(score_card, stretch=1)
+
+        # Export card — right of score
+        export_card = QFrame()
+        export_card.setObjectName("card")
+        export_card.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        export_layout = QVBoxLayout(export_card)
+        export_layout.setContentsMargins(12, 10, 12, 10)
+        export_layout.setSpacing(8)
+
+        export_header = QLabel("Экспорт отчёта")
+        export_header.setObjectName("sectionTitle")
+        export_layout.addWidget(export_header)
+
+        export_hint = QLabel(
+            "Сформировать сводный отчёт по всем выполненным стадиям анализа."
+        )
+        export_hint.setObjectName("muted")
+        export_hint.setWordWrap(True)
+        export_layout.addWidget(export_hint)
+
+        btn_grid = QVBoxLayout()
+        btn_grid.setSpacing(6)
+
+        top_btns = QHBoxLayout()
+        top_btns.setSpacing(8)
+        self.export_report_button = QPushButton("Экспорт (standard)")
+        self.export_report_button.setObjectName("primaryButton")
+        self.export_report_button.clicked.connect(lambda: self._export_combined_report("standard"))
+        top_btns.addWidget(self.export_report_button)
+        export_ext_btn = QPushButton("Экспорт (extended)")
+        export_ext_btn.clicked.connect(lambda: self._export_combined_report("extended"))
+        top_btns.addWidget(export_ext_btn)
+        top_btns.addStretch()
+        btn_grid.addLayout(top_btns)
+
+        bot_btns = QHBoxLayout()
+        bot_btns.setSpacing(8)
+        html_std_btn = QPushButton("HTML-отчёт (standard)")
+        html_std_btn.clicked.connect(lambda: self._generate_html_report("standard"))
+        bot_btns.addWidget(html_std_btn)
+        html_ext_btn = QPushButton("HTML-отчёт (extended)")
+        html_ext_btn.clicked.connect(lambda: self._generate_html_report("extended"))
+        bot_btns.addWidget(html_ext_btn)
+        bot_btns.addStretch()
+        btn_grid.addLayout(bot_btns)
+
+        export_layout.addLayout(btn_grid)
+        export_layout.addStretch()
+
+        top_row.addWidget(export_card, stretch=1)
+
+        top_widget = QWidget()
+        top_widget.setLayout(top_row)
+        layout.addWidget(top_widget)
+
+        # ── Run card ──────────────────────────────────────────────────────────
+        run_card = QFrame()
+        run_card.setObjectName("card")
+        run_layout = QVBoxLayout(run_card)
+        run_layout.setContentsMargins(16, 14, 16, 14)
+        run_layout.setSpacing(8)
+
+        run_header = QLabel("Запуск полного анализа")
+        run_header.setObjectName("sectionTitle")
+        run_layout.addWidget(run_header)
+
+        run_hint = QLabel("Запустить все стадии (Stage1 → Stage2 → Stage3) последовательно.")
+        run_hint.setObjectName("muted")
+        run_hint.setWordWrap(True)
+        run_layout.addWidget(run_hint)
+
+        self.pipeline_run_button = QPushButton("Запустить анализ")
+        self.pipeline_run_button.setObjectName("primaryButton")
+        self.pipeline_run_button.clicked.connect(self._start_full_pipeline)
+        run_layout.addWidget(self.pipeline_run_button)
+
+        self.pipeline_progress_bar = QProgressBar()
+        self.pipeline_progress_bar.setRange(0, 3)
+        self.pipeline_progress_bar.setValue(0)
+        self.pipeline_progress_bar.setTextVisible(True)
+        run_layout.addWidget(self.pipeline_progress_bar)
+
+        self.pipeline_stage_label = QLabel("")
+        self.pipeline_stage_label.setObjectName("muted")
+        run_layout.addWidget(self.pipeline_stage_label)
+
+        layout.addWidget(run_card)
+
+        # ── Log card (stretches to fill remaining space) ───────────────────
+        log_card = QFrame()
+        log_card.setObjectName("card")
+        log_card_layout = QVBoxLayout(log_card)
+        log_card_layout.setContentsMargins(16, 14, 16, 14)
+        log_card_layout.setSpacing(8)
+
+        log_header = QLabel("Журнал анализа")
+        log_header.setObjectName("sectionTitle")
+        log_card_layout.addWidget(log_header)
+
+        self.pipeline_log_view = QPlainTextEdit()
+        self.pipeline_log_view.setReadOnly(True)
+        log_card_layout.addWidget(self.pipeline_log_view, stretch=1)
+
+        log_btn_row = QHBoxLayout()
+        copy_log_btn = QPushButton("Копировать")
+        copy_log_btn.clicked.connect(lambda: QApplication.clipboard().setText(self.pipeline_log_view.toPlainText()) if self.pipeline_log_view else None)
+        log_btn_row.addWidget(copy_log_btn)
+        clear_log_btn = QPushButton("Очистить")
+        clear_log_btn.clicked.connect(lambda: self.pipeline_log_view.clear() if self.pipeline_log_view else None)
+        log_btn_row.addWidget(clear_log_btn)
+        log_btn_row.addStretch()
+        log_card_layout.addLayout(log_btn_row)
+
+        layout.addWidget(log_card, stretch=1)
+
+        return page
+
+    def _refresh_security_score(self) -> None:
+        """Пересчитывает Security Score и обновляет метки в UI."""
+        if not self.current_project:
+            self._set_score_labels(None)
+            return
+        try:
+            from analysis.reporting import ReportManager
+            from analysis.scoring import compute_score
+
+            rm = ReportManager(self.storage)
+            findings = rm.load_all_findings(self.current_project.project_id)
+            if not findings:
+                self._set_score_labels(None)
+                return
+            score = compute_score(findings)
+            self._set_score_labels(score)
+        except Exception:  # pylint: disable=broad-exception-caught
+            self._set_score_labels(None)
+
+    def _start_full_pipeline(self) -> None:
+        """Запускает полный цикл анализа."""
+        if not self.current_project:
+            QMessageBox.warning(self, "Анализ", "Сначала выберите проект.")
+            return
+        if self.pipeline_running:
+            return
+        from analysis.pipeline import PipelineConfig
+        avd_name = self.stage2_avd_combo.currentText().strip() if hasattr(self, "stage2_avd_combo") else "tapka_api30"
+        config = PipelineConfig(
+            run_stage2=True,
+            avd_name=avd_name or "tapka_api30",
+            run_stage3=True,
+        )
+        self.pipeline_running = True
+        self.pipeline_worker = FullPipelineWorker(
+            self.storage,
+            self.current_project.project_id,
+            config,
+        )
+        self.pipeline_worker.progress.connect(self._on_pipeline_progress)
+        self.pipeline_worker.finished.connect(self._on_pipeline_finished)
+        self.pipeline_worker.failed.connect(self._on_pipeline_failed)
+        self.pipeline_worker.start()
+        self._update_action_states()
+
+    def _on_pipeline_progress(self, msg: str) -> None:
+        """Обновляет лог и прогресс-бар при получении прогресса."""
+        if self.pipeline_log_view:
+            self.pipeline_log_view.appendPlainText(msg)
+        if self.pipeline_stage_label:
+            self.pipeline_stage_label.setText(msg[:100])
+        if self.pipeline_progress_bar:
+            if "Stage 1" in msg:
+                self.pipeline_progress_bar.setValue(1)
+            elif "Stage 2" in msg:
+                self.pipeline_progress_bar.setValue(2)
+            elif "Stage 3" in msg:
+                self.pipeline_progress_bar.setValue(3)
+
+    def _on_pipeline_finished(self, result) -> None:
+        """Вызывается при успешном завершении полного анализа."""
+        self.pipeline_running = False
+        if self.pipeline_worker:
+            self.pipeline_worker = None
+        if self.pipeline_progress_bar:
+            self.pipeline_progress_bar.setValue(3)
+        if self.pipeline_stage_label:
+            self.pipeline_stage_label.setText("Анализ завершён")
+        self._refresh_security_score()
+        self._update_action_states()
+        errors = getattr(result, "errors", [])
+        if errors:
+            QMessageBox.warning(self, "Анализ завершён", f"Завершено с ошибками:\n" + "\n".join(errors[:5]))
+
+    def _on_pipeline_failed(self, msg: str) -> None:
+        """Вызывается при критической ошибке полного анализа."""
+        self.pipeline_running = False
+        if self.pipeline_worker:
+            self.pipeline_worker = None
+        if self.pipeline_stage_label:
+            self.pipeline_stage_label.setText("Ошибка анализа")
+        if self.pipeline_log_view:
+            self.pipeline_log_view.appendPlainText(f"\n[ОШИБКА]\n{msg}")
+        self._update_action_states()
+        QMessageBox.critical(self, "Ошибка анализа", msg[:500])
+
+    def _set_score_labels(self, score) -> None:
+        """Обновляет все метки Security Score."""
+        RISK_COLORS = {
+            "safe": "#4caf50",
+            "low": "#8bc34a",
+            "medium": "#ff9800",
+            "high": "#f44336",
+            "critical": "#b71c1c",
+        }
+        if score is None:
+            text = "—"
+            detail = ""
+            big = "—"
+            risk_text = ""
+            breakdown = ""
+            color = "#888"
+        else:
+            text = f"{score.total:.0f}/100 [{score.risk_label.upper()}]"
+            color = RISK_COLORS.get(score.risk_label, "#888")
+            detail_parts = []
+            for s_key, ss in score.stages.items():
+                detail_parts.append(f"{s_key}: {ss.normalized:.0f} (H={ss.high_count} M={ss.medium_count})")
+            detail = "  |  ".join(detail_parts)
+            big = f"{score.total:.1f} / 100"
+            risk_text = f"Уровень риска: {score.risk_label.upper()}"
+            breakdown = detail
+
+        if self.security_score_label:
+            self.security_score_label.setText(text)
+            self.security_score_label.setStyleSheet(f"color: {color}; font-weight: bold;")
+        if self.security_score_detail:
+            self.security_score_detail.setText(detail)
+        if self.overall_score_label:
+            self.overall_score_label.setText(big)
+            self.overall_score_label.setStyleSheet(
+                f"color: {color}; font-size: 28px; font-weight: bold;"
+            )
+        if self.overall_risk_label:
+            self.overall_risk_label.setText(risk_text)
+        if self.overall_breakdown_label:
+            self.overall_breakdown_label.setText(breakdown)
+
+        stage_labels = {
+            "stage1": getattr(self, "stage1_score_label", None),
+            "stage2": getattr(self, "stage2_score_label", None),
+            "stage3": getattr(self, "stage3_score_label", None),
+        }
+        for s_key, lbl in stage_labels.items():
+            if lbl is None:
+                continue
+            if score and s_key in score.stages:
+                ss = score.stages[s_key]
+                lbl.setText(f"{s_key.capitalize()}: {ss.normalized:.0f}/100 (H={ss.high_count} M={ss.medium_count})")
+            else:
+                lbl.setText(f"{s_key.capitalize()}: N/A")
+
+    def _export_combined_report(self, report_type: str = "standard") -> None:
+        """Экспортирует объединённый JSON-отчёт в файл, выбранный пользователем."""
+        if not self.current_project:
+            QMessageBox.warning(self, "Экспорт", "Сначала выберите проект.")
+            return
+        save_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Сохранить сводный отчёт",
+            f"tapka_report_{self.current_project.project_id}.json",
+            "JSON files (*.json)",
+        )
+        if not save_path:
+            return
+        try:
+            from analysis.reporting import ReportManager, ReportType
+
+            rm = ReportManager(self.storage)
+            rt = ReportType.EXTENDED if report_type == "extended" else ReportType.STANDARD
+            combined = rm.generate_combined_report(self.current_project.project_id, rt)
+            Path(save_path).write_text(
+                combined.model_dump_json(indent=2, by_alias=True), encoding="utf-8"
+            )
+            QMessageBox.information(self, "Экспорт", f"Отчёт сохранён:\n{save_path}")
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            QMessageBox.critical(self, "Ошибка экспорта", str(exc))
+
+    def _generate_html_report(self, report_type: str = "standard") -> None:
+        """Генерирует HTML-отчёт и открывает его в браузере."""
+        if not self.current_project:
+            QMessageBox.warning(self, "HTML-отчёт", "Сначала выберите проект.")
+            return
+        try:
+            from analysis.reporting import ReportManager, ReportType
+            from analysis.reporting.stage3_html_report import render_report_html
+            from PySide6.QtGui import QDesktopServices
+            from PySide6.QtCore import QUrl
+
+            rm = ReportManager(self.storage)
+            rt = ReportType.EXTENDED if report_type == "extended" else ReportType.STANDARD
+            combined = rm.generate_combined_report(self.current_project.project_id, rt)
+            html = render_report_html(combined)
+            out_path = self.storage.get_active_version_dir(self.current_project.project_id) / f"report_{report_type}.html"
+            out_path.write_text(html, encoding="utf-8")
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(out_path)))
+        except Exception as exc:
+            QMessageBox.critical(self, "Ошибка генерации HTML", str(exc))
+
     def _build_stage1_controls_card(self) -> QFrame:
         card = QFrame()
         card.setObjectName("card")
@@ -1714,9 +2174,6 @@ class MainWindow(QMainWindow):
         self.open_report_button.clicked.connect(self._open_report)
         button_row.addWidget(self.open_report_button)
 
-        self.generate_report_button = QPushButton("Generate report")
-        self.generate_report_button.clicked.connect(self._generate_report)
-        button_row.addWidget(self.generate_report_button)
         button_row.addStretch(1)
         layout.addLayout(button_row)
 
@@ -2269,6 +2726,31 @@ class MainWindow(QMainWindow):
         self._append_mobsf_log("MobSF готов к работе.")
         self._set_mobsf_scan_status("Ожидание")
         self._update_action_states()
+        # After Docker is ready — run MobSF analysis only (APKiD/APKLeaks/Quark skipped)
+        if self.current_project and not self.batch_run_in_progress:
+            from analysis.mobsf.stage3_runner import Stage3Config  # noqa: PLC0415
+            from analysis.stage3_batch_runner import Stage3BatchConfig  # noqa: PLC0415
+            s3_config = Stage3BatchConfig(
+                mobsf_config=Stage3Config(
+                    enable_dynamic_android=True,
+                    enable_dynamic_v2=True,
+                    frida_steps=True,
+                    tls_tests=True,
+                    avd_adb_serial=None,
+                ),
+                skip_apkid=True,
+                skip_apkleaks=True,
+                skip_quark=True,
+            )
+            self.batch_run_worker = Stage3BatchWorker(self.storage, self.current_project.project_id, s3_config)
+            self.batch_run_worker.progress.connect(self._on_batch_progress)
+            self.batch_run_worker.progress.connect(self._append_mobsf_log)
+            self.batch_run_worker.finished.connect(self._on_batch_finished)
+            self.batch_run_worker.failed.connect(self._on_batch_failed)
+            self.batch_run_worker.start()
+            self.batch_run_in_progress = True
+            self._append_mobsf_log("Запущен анализ MobSF...")
+            self._update_action_states()
 
     def _on_mobsf_setup_failed(self, message: str) -> None:
         self.mobsf_setup_in_progress = False
@@ -2373,7 +2855,17 @@ class MainWindow(QMainWindow):
             self.batch_run_button.setEnabled(False)
         self._update_action_states()
 
-        config = Stage3BatchConfig()
+        config = Stage3BatchConfig(
+            mobsf_config=Stage3Config(
+                enable_dynamic_android=True,
+                enable_dynamic_v2=True,
+                frida_steps=True,
+            ),
+            skip_mobsf=self.batch_skip_mobsf_check.isChecked(),
+            skip_quark=self.batch_skip_quark_check.isChecked(),
+            skip_apkid=self.batch_skip_apkid_check.isChecked(),
+            skip_apkleaks=self.batch_skip_apkleaks_check.isChecked(),
+        )
         self.batch_run_worker = Stage3BatchWorker(
             self.storage, self.current_project.project_id, config
         )
@@ -2401,6 +2893,7 @@ class MainWindow(QMainWindow):
             self.batch_log_view.appendPlainText("=== Кросс-инструментальный анализ завершён ===")
         self._load_latest_run()
         self._update_action_states()
+        self._refresh_security_score()
 
     def _on_batch_failed(self, message: str) -> None:
         self.batch_run_in_progress = False
@@ -2437,8 +2930,20 @@ class MainWindow(QMainWindow):
             self.mobsf_run_button.setEnabled(False)
         self._update_action_states()
 
-        config = Stage3Config()
-        config.enable_quark = False
+        config = Stage3Config(
+            enable_dynamic_android=(
+                hasattr(self, "mobsf_dynamic_check") and self.mobsf_dynamic_check.isChecked()
+            ),
+            enable_dynamic_v2=(
+                hasattr(self, "mobsf_dynamic_v2_check") and self.mobsf_dynamic_v2_check.isChecked()
+            ),
+            frida_steps=(
+                hasattr(self, "mobsf_frida_check") and self.mobsf_frida_check.isChecked()
+            ),
+            tls_tests=(
+                hasattr(self, "mobsf_tls_check") and self.mobsf_tls_check.isChecked()
+            ),
+        )
         self.mobsf_run_worker = Stage3Worker(self.storage, self.current_project.project_id, config)
         self.mobsf_run_worker.progress.connect(self._handle_mobsf_progress)
         self.mobsf_run_worker.finished.connect(self._on_mobsf_run_finished)
@@ -2459,6 +2964,7 @@ class MainWindow(QMainWindow):
         self._update_mobsf_summary()
         self._load_latest_run()
         self._update_action_states()
+        self._refresh_security_score()
 
     def _on_mobsf_run_failed(self, message: str) -> None:
         self.mobsf_run_in_progress = False
@@ -2590,6 +3096,7 @@ class MainWindow(QMainWindow):
         self._update_mobsf_summary()
         self._load_latest_run()
         self._update_action_states()
+        self._refresh_security_score()
 
     def _on_quark_run_failed(self, message: str) -> None:
         self.quark_run_in_progress = False
@@ -2619,6 +3126,7 @@ class MainWindow(QMainWindow):
         self._update_apkid_summary()
         self._render_apkid_log_view()
         self._update_action_states()
+        self._refresh_security_score()
 
     def _on_apkid_run_failed(self, message: str) -> None:
         self.apkid_run_in_progress = False
@@ -2648,6 +3156,7 @@ class MainWindow(QMainWindow):
         self._update_apkleaks_summary()
         self._render_apkleaks_log_view()
         self._update_action_states()
+        self._refresh_security_score()
 
     def _on_apkleaks_run_failed(self, message: str) -> None:
         self.apkleaks_run_in_progress = False
@@ -2708,7 +3217,11 @@ class MainWindow(QMainWindow):
             return
         if self.current_project and self.current_project.project_id == project_id:
             self._set_current_project(None)
+        # Block signals while rebuilding the list so the stale selected item
+        # does not trigger _on_project_selected with a FileNotFoundError.
+        self.project_list.blockSignals(True)
         self.refresh_projects()
+        self.project_list.blockSignals(False)
 
     def _on_project_selected(self) -> None:
         selected = self.project_list.selectedItems()
@@ -2718,7 +3231,14 @@ class MainWindow(QMainWindow):
         project_id = selected[0].data(Qt.UserRole)
         try:
             project = self.storage.load_project(project_id)
-        except (FileNotFoundError, ValueError, OSError, json.JSONDecodeError) as exc:
+        except FileNotFoundError:
+            # Project was deleted from disk (e.g. just removed); silently drop the stale item.
+            self.project_list.blockSignals(True)
+            self.project_list.takeItem(self.project_list.row(selected[0]))
+            self.project_list.blockSignals(False)
+            self._set_current_project(None)
+            return
+        except (ValueError, OSError, json.JSONDecodeError) as exc:
             QMessageBox.warning(self, "Ошибка", str(exc))
             return
         self._set_current_project(project)
@@ -2744,6 +3264,7 @@ class MainWindow(QMainWindow):
             self._clear_run_views()
             self._clear_stage3_views()
             self._update_action_states()
+            self._set_score_labels(None)
             return
 
         self.current_project_dir = self.storage.get_project_dir(project.project_id)
@@ -2766,6 +3287,7 @@ class MainWindow(QMainWindow):
 
         self._load_latest_run()
         self._update_action_states()
+        self._refresh_security_score()
 
     def _load_latest_run(self) -> None:
         if not self.current_project:
@@ -2853,6 +3375,8 @@ class MainWindow(QMainWindow):
             self._load_logs([])
         if self.artifacts_table:
             self._load_artifacts([])
+        if hasattr(self, "stage2_log_view") and self.stage2_log_view:
+            self.stage2_log_view.setPlainText("")
         self._update_tool_statuses(None)
 
     def _load_run_views(self) -> None:
@@ -2895,6 +3419,12 @@ class MainWindow(QMainWindow):
             self.apkid_summary_updated.setText("-")
         if self.apkid_log_view:
             self.apkid_log_view.setPlainText("")
+        if self.mobsf_log_view:
+            self.mobsf_log_view.setPlainText("")
+        if self.quark_log_view:
+            self.quark_log_view.setPlainText("")
+        if self.batch_log_view:
+            self.batch_log_view.setPlainText("")
         if self.apkleaks_progress_label and self.apkleaks_progress_bar:
             self.apkleaks_progress_label.setText("Готово")
             self.apkleaks_progress_bar.setMaximum(1)
@@ -3421,6 +3951,7 @@ class MainWindow(QMainWindow):
         self._load_run_views()
         self._update_tool_statuses(run)
         self._update_action_states()
+        self._refresh_security_score()
 
     def _on_run_failed(self, message: str) -> None:
         self.analysis_running = False
@@ -3583,9 +4114,10 @@ class MainWindow(QMainWindow):
         self.run_analysis_button.setEnabled(has_apk and not running and on_static_stage)
         self.open_project_folder_button.setEnabled(has_project)
         self.open_report_button.setEnabled(self._report_available() and not running)
-        self.generate_report_button.setEnabled(
-            has_project and not running and on_static_stage and not self._report_available()
-        )
+        if self.generate_report_button:
+            self.generate_report_button.setEnabled(
+                has_project and not running and on_static_stage and not self._report_available()
+            )
 
         if self.log_copy_button:
             self.log_copy_button.setEnabled(has_run)
@@ -3635,13 +4167,6 @@ class MainWindow(QMainWindow):
             self.mobsf_stop_button.setEnabled(
                 not self.mobsf_setup_in_progress and self.mobsf_running and not stage3_busy
             )
-        if self.mobsf_run_button:
-            can_run_stage3 = (
-                has_apk
-                and self.current_stage_id == STAGE_CROSS_TOOL
-                and self.mobsf_running
-            )
-            self.mobsf_run_button.setEnabled(not stage3_busy and can_run_stage3)
         if self.quark_run_button:
             can_run_quark = has_apk and self.current_stage_id == STAGE_CROSS_TOOL
             self.quark_run_button.setEnabled(
@@ -3661,6 +4186,10 @@ class MainWindow(QMainWindow):
             self.apkid_open_dir_button.setEnabled(on_stage3 and stage3_has_run and not stage3_busy)
         if self.apkleaks_open_dir_button:
             self.apkleaks_open_dir_button.setEnabled(on_stage3 and stage3_has_run and not stage3_busy)
+        if self.pipeline_run_button:
+            self.pipeline_run_button.setEnabled(
+                has_apk and not self.pipeline_running and not running
+            )
 
     def _set_tool_status(self, tool: str, status: str, text: str | None = None) -> None:
         button = self.tool_status_buttons.get(tool)

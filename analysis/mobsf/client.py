@@ -10,6 +10,11 @@ import requests
 
 DEFAULT_TIMEOUT_SEC = 30
 SCAN_TIMEOUT_SEC = 300
+DYNAMIC_TIMEOUT_SEC = 300   # dynamic_start involves APK install + activity launch
+DYNAMIC_STOP_TIMEOUT_SEC = 600  # stop archives app data + collects logs (slow on large apps)
+TLS_TEST_TIMEOUT_SEC = 120   # TLS tests probe live app endpoints — can take time
+ACTIVITY_TIMEOUT_SEC = 300  # activity launch / tester — MobSF queues shell commands on device
+MOBSFY_TIMEOUT_SEC = 180    # mobsfy sets up device: push certs, install agents, configure proxy
 
 
 @dataclass(frozen=True)
@@ -188,13 +193,14 @@ class MobSFClient:
             data["re_install"] = str(re_install)
         if install is not None:
             data["install"] = str(install)
-        return self._post("/api/v1/dynamic/start_analysis", data=data)
+        return self._post("/api/v1/dynamic/start_analysis", data=data, timeout_sec=DYNAMIC_TIMEOUT_SEC)
 
     def android_logcat(self, package: str) -> MobSFResponse:
-        return self._post("/api/v1/android/logcat", data={"package": package})
+        return self._post("/api/v1/android/logcat", data={"package": package}, timeout_sec=120)
 
     def android_mobsfy(self, identifier: str) -> MobSFResponse:
-        return self._post("/api/v1/android/mobsfy", data={"identifier": identifier})
+        return self._post("/api/v1/android/mobsfy", data={"identifier": identifier},
+                          timeout_sec=MOBSFY_TIMEOUT_SEC)
 
     def android_adb_command(self, cmd: str) -> MobSFResponse:
         return self._post("/api/v1/android/adb_command", data={"cmd": cmd})
@@ -206,14 +212,16 @@ class MobSFClient:
         return self._post("/api/v1/android/global_proxy", data={"action": action})
 
     def android_activity(self, scan_hash: str, test: str) -> MobSFResponse:
-        return self._post("/api/v1/android/activity", data={"hash": scan_hash, "test": test})
+        return self._post("/api/v1/android/activity", data={"hash": scan_hash, "test": test},
+                          timeout_sec=ACTIVITY_TIMEOUT_SEC)
 
     def android_start_activity(self, scan_hash: str, activity: str) -> MobSFResponse:
         data = {"hash": scan_hash, "activity": activity}
-        return self._post("/api/v1/android/start_activity", data=data)
+        return self._post("/api/v1/android/start_activity", data=data,
+                          timeout_sec=ACTIVITY_TIMEOUT_SEC)
 
     def android_tls_tests(self, scan_hash: str) -> MobSFResponse:
-        return self._post("/api/v1/android/tls_tests", data={"hash": scan_hash})
+        return self._post("/api/v1/android/tls_tests", data={"hash": scan_hash}, timeout_sec=TLS_TEST_TIMEOUT_SEC)
 
     def frida_instrument(
         self,
@@ -268,10 +276,11 @@ class MobSFClient:
         return self._parse_response(response)
 
     def dynamic_stop_analysis(self, scan_hash: str) -> MobSFResponse:
-        return self._post("/api/v1/dynamic/stop_analysis", data={"hash": scan_hash})
+        return self._post("/api/v1/dynamic/stop_analysis", data={"hash": scan_hash}, timeout_sec=DYNAMIC_STOP_TIMEOUT_SEC)
 
     def dynamic_report_json(self, scan_hash: str) -> MobSFResponse:
-        return self._post("/api/v1/dynamic/report_json", data={"hash": scan_hash})
+        return self._post("/api/v1/dynamic/report_json", data={"hash": scan_hash},
+                          timeout_sec=DYNAMIC_STOP_TIMEOUT_SEC)
 
     def dynamic_view_source(self, scan_hash: str, file_path: str, file_type: str) -> MobSFResponse:
         data = {"hash": scan_hash, "file": file_path, "type": file_type}

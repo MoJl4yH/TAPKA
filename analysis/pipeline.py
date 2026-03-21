@@ -1,0 +1,131 @@
+"""Full-pipeline orchestrator: Stage1 → Stage2 → Stage3 + SecurityScore."""
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable
+
+from analysis.models.stage2 import Stage2Config
+from analysis.stage3_batch_runner import Stage3BatchConfig
+from analysis.storage import Storage
+
+
+@dataclass
+class PipelineConfig:
+    run_stage2: bool = True
+    avd_name: str = "tapka_api30"
+    runtime_sec: int = 180
+    run_stage3: bool = True
+    stage3_config: Stage3BatchConfig | None = None
+    report_type: str = "standard"
+
+
+@dataclass
+class PipelineResult:
+    project_id: str
+    stage1_ok: bool = False
+    stage2_ok: bool = False
+    stage3_ok: bool = False
+    security_score: object | None = None   # analysis.scoring.SecurityScore
+    run_dir: Path | None = None
+    elapsed_sec: float = 0.0
+    errors: list[str] = field(default_factory=list)
+
+
+def run_full_pipeline(
+    apk_path: str | Path,
+    storage: Storage,
+    config: PipelineConfig | None = None,
+    on_progress: Callable[[str], None] | None = None,
+    project_id: str | None = None,
+) -> PipelineResult:
+    """Запускает все стадии для *apk_path* и возвращает PipelineResult.
+
+    Если *project_id* передан — использует существующий проект (не создаёт новый).
+    """
+    from analysis.scoring import compute_score
+    from analysis.stage1_analysis import Stage1StaticRunner
+    from analysis.stage2.runner import Stage2DynamicRunner
+    from analysis.reporting import ReportManager
+
+    cfg = config or PipelineConfig()
+    log = on_progress or (lambda m: None)
+    start_ts = time.monotonic()
+
+    # Создаём или используем существующий проект
+    if project_id:
+        # Используем переданный project_id, не создаём новый проект
+        pass
+    else:
+        project = storage.create_project(str(apk_path))
+        project_id = project.project_id
+    result = PipelineResult(project_id=project_id)
+
+    # ── Stage 1 ──────────────────────────────────────────────────────────────
+    log("=== Pipeline: Stage 1 — Static Analysis ===")
+    try:
+        runner1 = Stage1StaticRunner(storage, on_progress=log)
+        runner1.run(project_id)
+        result.stage1_ok = True
+        log("Stage 1 OK")
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        result.errors.append(f"stage1: {exc}")
+        log(f"Stage 1 FAILED: {exc}")
+
+    # ── Stage 2 ──────────────────────────────────────────────────────────────
+    if cfg.run_stage2:
+        log("=== Pipeline: Stage 2 — Dynamic Analysis ===")
+        try:
+            cfg2 = Stage2Config(
+                avd_name=cfg.avd_name,
+                runtime_duration_sec=cfg.runtime_sec,
+            )
+            runner2 = Stage2DynamicRunner(storage, config=cfg2, on_progress=log)
+            runner2.run(project_id)
+            result.stage2_ok = True
+            log("Stage 2 OK")
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            result.errors.append(f"stage2: {exc}")
+            log(f"Stage 2 FAILED: {exc}")
+
+    # ── Stage 3 ──────────────────────────────────────────────────────────────
+    if cfg.run_stage3:
+        log("=== Pipeline: Stage 3 — Cross-tool Analysis ===")
+        try:
+            from analysis.stage3_batch_runner import Stage3BatchRunner
+
+            s3_cfg = cfg.stage3_config or Stage3BatchConfig()
+            runner3 = Stage3BatchRunner(storage, config=s3_cfg, on_progress=log)
+            runner3.run(project_id)
+            result.stage3_ok = True
+            log("Stage 3 OK")
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            result.errors.append(f"stage3: {exc}")
+            log(f"Stage 3 FAILED: {exc}")
+
+    # ── Security Score ────────────────────────────────────────────────────────
+    try:
+        from analysis.reporting import ReportManager as RM, ReportType
+
+        rm = RM(storage)
+        findings_by_stage = rm.load_all_findings(project_id)
+        result.security_score = compute_score(findings_by_stage)
+        log(f"Security Score: {result.security_score.total:.1f} ({result.security_score.risk_label})")
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        result.errors.append(f"scoring: {exc}")
+
+    # ── Save combined report ──────────────────────────────────────────────────
+    try:
+        from analysis.reporting import ReportManager as RM2, ReportType as RT2
+
+        rm2 = RM2(storage)
+        combined = rm2.generate_combined_report(project_id, RT2.EXTENDED)
+        overall_path = storage.get_active_version_dir(project_id) / "overall_report.json"
+        overall_path.write_text(combined.model_dump_json(indent=2, by_alias=True), encoding="utf-8")
+        log(f"Combined report: {overall_path}")
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        result.errors.append(f"combined_report: {exc}")
+
+    result.elapsed_sec = round(time.monotonic() - start_ts, 1)
+    return result

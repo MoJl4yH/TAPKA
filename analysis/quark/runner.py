@@ -23,13 +23,17 @@ QUARK_COMMAND = "quark"
 
 
 def _quark_is_matched(crime: dict) -> bool:
-    """Module-level helper: a rule is considered matched if confidence >= 60% or score > 0."""
+    """Module-level helper: a rule is considered matched if confidence >= 60% or score >= 1.0.
+
+    score >= 1.0 means both APIs in a crime pair were found (full trace).
+    BUG-41: raised score threshold from > 0 to >= 1.0 to reduce partial-match noise.
+    """
     conf_str = crime.get("confidence", "0%")
     try:
         conf_val = int(conf_str.replace("%", ""))
     except (ValueError, AttributeError):
         conf_val = 0
-    return conf_val >= 60 or crime.get("score", 0) > 0
+    return conf_val >= 60 or crime.get("score", 0) >= 1.0
 
 
 @dataclass

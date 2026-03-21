@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+import subprocess
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Callable
 
 from analysis.mobsf import DEFAULT_MOBSF_URL, ensure_mobsf_ready, normalize_base_url
@@ -13,6 +16,25 @@ from analysis.storage import Storage
 from models import Run
 
 
+def _now_utc() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _detect_emulator() -> str | None:
+    """Return the ADB serial of the first connected emulator, or None."""
+    try:
+        result = subprocess.run(
+            ["adb", "devices"], capture_output=True, text=True, timeout=10
+        )
+        for line in result.stdout.splitlines()[1:]:
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] == "device":
+                return parts[0]
+    except Exception:  # pylint: disable=broad-exception-caught
+        pass
+    return None
+
+
 @dataclass
 class Stage3BatchConfig:
     mobsf_config: Stage3Config = field(default_factory=Stage3Config)
@@ -23,6 +45,12 @@ class Stage3BatchConfig:
     skip_quark: bool = False
     skip_apkid: bool = False
     skip_apkleaks: bool = False
+    tool_timeout_sec: int | None = None  # None = без таймаута; переопределяет individual configs
+
+    def __post_init__(self) -> None:
+        if self.tool_timeout_sec is not None:
+            self.apkid_config.apkid_timeout_sec = self.tool_timeout_sec
+            self.apkleaks_config.apkleaks_timeout_sec = self.tool_timeout_sec
 
 
 class Stage3BatchRunner:
@@ -51,7 +79,16 @@ class Stage3BatchRunner:
                     settings.get("mobsf", {}).get("url", DEFAULT_MOBSF_URL)
                 )
                 api_key = get_mobsf_api_key()
-                setup = ensure_mobsf_ready(mobsf_url, api_key=api_key, log=self.on_progress)
+                emulator_id = (
+                    self.config.mobsf_config.avd_adb_serial
+                    or _detect_emulator()
+                    or "emulator-5554"  # default tapka AVD serial
+                )
+                setup = ensure_mobsf_ready(
+                    mobsf_url, api_key=api_key,
+                    emulator_id=emulator_id,
+                    log=self.on_progress,
+                )
                 # Persist generated key if it's new
                 if setup.api_key and setup.api_key != api_key:
                     try:
@@ -114,5 +151,28 @@ class Stage3BatchRunner:
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 self.on_progress(f"Quark завершился ошибкой: {exc}")
                 results["quark"] = exc
+
+        # ── Финализация run.json ─────────────────────────────────────────────
+        failed = [k for k, v in results.items() if isinstance(v, Exception)]
+        enabled_count = sum(1 for skip in (
+            self.config.skip_mobsf, self.config.skip_apkid,
+            self.config.skip_apkleaks, self.config.skip_quark,
+        ) if not skip)
+        if enabled_count > 0 and len(failed) == enabled_count:
+            overall_status = "Error"
+        elif failed:
+            overall_status = "Partial"
+        else:
+            overall_status = "Done"
+
+        run_json_path = ctx.run_dir / "run.json"
+        if run_json_path.exists():
+            try:
+                data = json.loads(run_json_path.read_text(encoding="utf-8"))
+                data["status"] = overall_status
+                data["finished_at"] = _now_utc()
+                run_json_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            except (OSError, json.JSONDecodeError):
+                pass
 
         return results

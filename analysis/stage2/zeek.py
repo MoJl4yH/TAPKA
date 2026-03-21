@@ -46,9 +46,11 @@ _CDN_SUFFIXES = frozenset({
 _HTTP_AUTH_HEADERS = frozenset({
     "authorization", "x-auth-token", "x-api-key",
     "cookie", "x-session-id", "x-access-token",
+    "x-firebase-idtoken", "x-firebase-auth",  # BUG-28: Firebase auth headers
 })
 _HTTP_AUTH_URI_PATTERNS = frozenset({
     "/login", "/auth", "/token", "/password", "/signin", "/session",
+    "/register", "/signup", "/logout", "/reset", "/verify",  # BUG-28: extended URI patterns
 })
 
 # Obsolete TLS versions (hex as tshark reports them).
@@ -123,6 +125,21 @@ class ZeekAnalyzer:
 
         if shutil.which("zeek"):
             self._analyze_with_zeek(pcap_path, out_dir, capture)
+            # BUG-25: also run tshark TSV exports + alert rules when zeek is primary backend
+            if shutil.which("tshark"):
+                self._export_tshark_tsvs(pcap_path, out_dir, capture)
+                alerts = self._evaluate_alerts(out_dir, capture_duration_sec)
+                capture.alerts = alerts
+                if alerts:
+                    alerts_path = out_dir / "tshark_alerts.json"
+                    alerts_path.write_text(
+                        json.dumps(alerts, indent=2, ensure_ascii=False),
+                        encoding="utf-8",
+                    )
+                    capture.zeek_logs["tshark_alerts.json"] = str(alerts_path)
+                    self._log(f"Предупреждения (zeek+tshark): сработало правил — {len(alerts)}.")
+                else:
+                    self._log("Предупреждения: правила не сработали.")
         elif shutil.which("tshark"):
             self._analyze_with_tshark(pcap_path, out_dir, capture, capture_duration_sec)
         else:
@@ -424,24 +441,34 @@ class ZeekAnalyzer:
                 continue
 
             trigger_reason = ""
+            confidence = "C2"
             if auth_header and auth_header.lower().split(":")[0].strip() in _HTTP_AUTH_HEADERS:
                 trigger_reason = f"Присутствует заголовок авторизации: {auth_header[:60]}"
             elif any(pat in uri.lower() for pat in _HTTP_AUTH_URI_PATTERNS):
                 trigger_reason = f"Чувствительный URI: {uri[:100]}"
+            elif host:
+                # BUG-28: any external HTTP to non-platform host is noteworthy at C1
+                trigger_reason = f"Незашифрованный HTTP к внешнему хосту"
+                confidence = "C1"
 
             if trigger_reason:
-                hits.append({"host": host, "uri": uri, "reason": trigger_reason})
+                hits.append({"host": host, "uri": uri, "reason": trigger_reason, "confidence": confidence})
 
         if not hits:
             return []
+        # Report C2 hits first; if only C1 hits exist, downgrade overall confidence
+        c2_hits = [h for h in hits if h.get("confidence") == "C2"]
+        overall_confidence = "C2" if c2_hits else "C1"
+        representative = (c2_hits or hits)[0]
         return [{
             "rule_id": "sec_runtime_cleartext_transport",
-            "confidence": "C2",
-            "title": "Обнаружен открытый HTTP с признаками аутентификации или сессии",
+            "confidence": overall_confidence,
+            "title": "Обнаружен открытый HTTP без шифрования",
             "detail": (
-                f"Обнаружено {len(hits)} HTTP-запросов с индикаторами аутентификации/сессии без шифрования. "
-                f"Первый пример: host={hits[0]['host']}, uri={hits[0]['uri']}. "
-                f"Причина: {hits[0]['reason']}"
+                f"Обнаружено {len(hits)} HTTP-запросов без шифрования "
+                f"({len(c2_hits)} с индикаторами аутентификации/сессии). "
+                f"Первый пример: host={representative['host']}, uri={representative['uri']}. "
+                f"Причина: {representative['reason']}"
             ),
             "evidence": "tshark_http_detailed.tsv",
             "suppression_checks": [

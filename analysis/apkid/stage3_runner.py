@@ -24,7 +24,7 @@ from models import Run
 
 @dataclass
 class Stage3ApkidConfig:
-    apkid_timeout_sec: int | None = 120
+    apkid_timeout_sec: int | None = None
     apkid_scan_depth: int | None = None
     apkid_entry_max_scan_size: int | None = None
     apkid_typing: str | None = None

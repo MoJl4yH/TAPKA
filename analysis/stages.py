@@ -7,5 +7,5 @@ STAGES = [
     (STAGE_STATIC, "Статический анализ"),
     (STAGE_DYNAMIC, "Динамический анализ"),
     (STAGE_CROSS_TOOL, "Кросс-инструментальный анализ"),
-    (STAGE_OVERALL, "Сводный отчёт"),
+    (STAGE_OVERALL, "Полный цикл тестирования"),
 ]

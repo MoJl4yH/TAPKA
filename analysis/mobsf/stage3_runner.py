@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import time
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -47,6 +49,7 @@ from models import Run
 @dataclass
 class Stage3Config:
     enable_dynamic_android: bool = False
+    enable_dynamic_v2: bool = False        # Use improved dynamic workflow (mobsfy + CA + proxy + wait)
     enable_ios: bool = False
     enable_quark: bool = False
     cleanup_scans: bool = False
@@ -58,9 +61,19 @@ class Stage3Config:
     quark_rules_dir: str | None = None
     view_source_files: list[tuple[str, str]] = field(default_factory=list)
     dynamic_view_source_files: list[tuple[str, str]] = field(default_factory=list)
-    frida_default_hooks: str = "api_monitor"
-    frida_auxiliary_hooks: str = ""
+    # default hooks: all standard MobSF scripts that are useful for security analysis
+    # (api_monitor, ssl_pinning_bypass, root_bypass, debugger_check_bypass, dump_clipboard)
+    frida_default_hooks: str = (
+        "api_monitor,ssl_pinning_bypass,root_bypass,debugger_check_bypass,dump_clipboard"
+    )
+    # auxiliary hooks: enumerate loaded classes and catch string operations
+    frida_auxiliary_hooks: str = "enum_class,string_catch"
     frida_code: str = ""
+    monkey_events: int = 150          # 0 = skip; random UI events via adb monkey
+    monkey_throttle_ms: int = 200     # ms between monkey events (~30s for 150 events)
+    avd_adb_serial: str | None = None     # ADB serial to pass directly to MobSF mobsfy
+    avd_name: str = "tapka_api30"         # AVD name for emulator restart
+    restart_emulator: bool = True         # Wipe + restart emulator before dynamic analysis for clean state
 
 
 class Stage3MobSFRunner:
@@ -367,16 +380,37 @@ class Stage3MobSFRunner:
             log("Режим просмотра исходников включён, но список файлов не задан.")
 
         if self.config.enable_dynamic_android:
-            dynamic_summary, dynamic_artifacts = self._run_dynamic_android(
-                client,
-                scan_hash,
-                dynamic_dir,
-                trace_dir,
-                log,
-                run_dir,
-                dynamic_summary,
-            )
-            dynamic_android_artifacts.update(dynamic_artifacts)
+            try:
+                if self.config.enable_dynamic_v2:
+                    # Extract main_activity from static report — API docs confirm that
+                    # dynamic_start_analysis response does NOT include activities.
+                    static_main_activity = ""
+                    if isinstance(report_resp.json_data, dict):
+                        static_main_activity = report_resp.json_data.get("main_activity") or ""
+                    dynamic_summary, dynamic_artifacts = self._run_dynamic_android_v2(
+                        client,
+                        scan_hash,
+                        dynamic_dir,
+                        trace_dir,
+                        log,
+                        run_dir,
+                        dynamic_summary,
+                        main_activity=static_main_activity,
+                    )
+                else:
+                    dynamic_summary, dynamic_artifacts = self._run_dynamic_android(
+                        client,
+                        scan_hash,
+                        dynamic_dir,
+                        trace_dir,
+                        log,
+                        run_dir,
+                        dynamic_summary,
+                    )
+                dynamic_android_artifacts.update(dynamic_artifacts)
+            except MobSFClientError as _dyn_exc:  # pylint: disable=broad-exception-caught
+                dynamic_summary.status = "failed"
+                log(f"[WARN] Динамический анализ MobSF пропущен: {_dyn_exc}")
 
         if self.config.cleanup_scans:
             self._emit("Очистка данных сканирования MobSF...")
@@ -470,6 +504,16 @@ class Stage3MobSFRunner:
                 trace_dir,
                 "dynamic_frida_logs",
             )
+            self._emit("Сбор зависимостей приложения (Frida)...")
+            try:
+                self._call_and_save_json(
+                    lambda: client.frida_get_dependencies(scan_hash),
+                    frida_dir / "dependencies.json",
+                    trace_dir,
+                    "dynamic_frida_dependencies",
+                )
+            except MobSFClientError as exc:
+                log(f"[WARN] frida_get_dependencies: {exc}")
             artifacts["frida"] = self._relpath(run_dir, frida_dir)
 
         self._emit("Остановка динамического анализа...")
@@ -505,6 +549,489 @@ class Stage3MobSFRunner:
             artifacts["view_source"] = self._relpath(run_dir, view_dir)
 
         return summary, artifacts
+
+    def _get_emulator_identifier(self) -> str:
+        """Return the serial of the first connected emulator via adb devices."""
+        # avd_adb_serial must be an actual ADB serial (e.g. emulator-5554), not an AVD name
+        if self.config.avd_adb_serial and self.config.avd_adb_serial.startswith("emulator-"):
+            return self.config.avd_adb_serial
+        try:
+            result = subprocess.run(
+                ["adb", "devices"], capture_output=True, text=True, timeout=10
+            )
+            for line in result.stdout.splitlines()[1:]:
+                parts = line.split()
+                if len(parts) >= 2 and parts[1] == "device":
+                    return parts[0]
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+        return "emulator-5554"
+
+    def _wait_for_app_launch(
+        self,
+        client: MobSFClient,
+        package: str,
+        timeout_sec: int = 60,
+    ) -> None:
+        """Poll logcat until the package appears in output or timeout is reached."""
+        start = time.monotonic()
+        while time.monotonic() - start < timeout_sec:
+            try:
+                resp = client.android_logcat(package)
+                if resp.status_code == 200 and package in (resp.text or ""):
+                    self._emit(f"Приложение {package} запущено")
+                    return
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+            time.sleep(3)
+        self._emit(f"Timeout ожидания запуска {package} ({timeout_sec}s)")
+
+    def _wait_for_app_launch_adb(
+        self,
+        serial: str,
+        package: str,
+        timeout_sec: int = 60,
+    ) -> None:
+        """Wait for the app process to appear in adb shell ps (no MobSF streaming)."""
+        adb = ["adb", "-s", serial]
+        start = time.monotonic()
+        while time.monotonic() - start < timeout_sec:
+            try:
+                r = subprocess.run(
+                    adb + ["shell", "ps", "-A"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if package in (r.stdout or ""):
+                    self._emit(f"Приложение {package} запущено")
+                    return
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+            time.sleep(3)
+        self._emit(f"Timeout ожидания запуска {package} ({timeout_sec}s)")
+
+    def _collect_logcat_adb(
+        self,
+        serial: str,
+        package: str,
+        output_path: Path,
+    ) -> None:
+        """Collect logcat dump via direct ADB (avoids MobSF SSE streaming endpoint)."""
+        try:
+            r = subprocess.run(
+                ["adb", "-s", serial, "logcat", "-d", f"{package}:V", "*:S"],
+                capture_output=True, text=True, timeout=30,
+            )
+            output_path.write_text(r.stdout or "", encoding="utf-8", errors="replace")
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            self._emit(f"[WARN] logcat adb: {exc}")
+
+    def _run_dynamic_android_v2(
+        self,
+        client: MobSFClient,
+        scan_hash: str,
+        dynamic_dir: Path,
+        trace_dir: Path,
+        log: Callable[[str], None],
+        run_dir: Path,
+        summary: MobSFDynamicAndroidSummary,
+        main_activity: str = "",
+    ) -> tuple[MobSFDynamicAndroidSummary, dict[str, str]]:
+        """Orchestrated dynamic analysis workflow.
+
+        Steps:
+        1. mobsfy  — connect emulator to MobSF
+        2. root_ca — install MobSF CA certificate
+        3. proxy   — set global proxy
+        4. start   — launch dynamic analysis
+        5. wait    — poll logcat until app launches
+        6. tls     — TLS tests (if enabled)
+        7. frida   — instrumentation (if enabled)
+        8. stop    — stop dynamic analysis
+        9. report  — fetch dynamic report JSON
+        """
+        artifacts: dict[str, str] = {}
+        self._emit("Запуск оркестрированного динамического анализа MobSF (v2)...")
+
+        # 0. Restart emulator with -wipe-data for a clean state before each analysis run
+        if self.config.restart_emulator:
+            from analysis.stage2.emulator import EmulatorManager  # noqa: PLC0415
+            self._emit(f"Перезапуск эмулятора {self.config.avd_name} (wipe-data)...")
+            mgr = EmulatorManager(
+                avd_name=self.config.avd_name,
+                on_log=log,
+            )
+            mgr.start(headless=True)
+            if not mgr.wait_boot(timeout_sec=240):
+                raise RuntimeError("Emulator failed to boot within 240s")
+            mgr.root()
+            # frida 16+ marks Android as "jailed" when SELinux is Enforcing,
+            # causing NotSupportedError on spawn/attach. Disable enforcement.
+            emulator_serial = self._get_emulator_identifier()
+            subprocess.run(
+                ["adb", "-s", emulator_serial, "shell", "setenforce", "0"],
+                capture_output=True, timeout=10, check=False,
+            )
+
+        # 1. Connect emulator to MobSF
+        emulator_id = self._get_emulator_identifier()
+        self._emit(f"Подключение эмулятора {emulator_id} к MobSF (mobsfy)...")
+
+        # MobSF supports dynamic analysis only up to ANDROID_API_SUPPORTED = 30 (Android 11).
+        # Check before wasting time on bridge setup.
+        self._check_mobsf_api_level(emulator_id)
+
+        # Apply TAPKA compatibility patches to MobSF container (idempotent).
+        # Redirects /system writes (frida-server, .mobsf-f) to /data/local/tmp.
+        from analysis.mobsf import apply_mobsf_patches, _is_mobsf_patched  # noqa: PLC0415
+        if not _is_mobsf_patched():
+            apply_mobsf_patches(log=log)
+
+        # MobSF translates emulator-5554 → host.docker.internal:5555 internally.
+        # host.docker.internal resolves to the Docker bridge IP (172.17.0.1) via
+        # --add-host host.docker.internal:host-gateway in docker_run().
+        # But QEMU binds the emulator ADB port only on 127.0.0.1:5555, not on the
+        # bridge IP. Fix: enable TCP mode on adbd, then run socat to forward
+        # bridge_ip:5555 → 127.0.0.1:5555 so MobSF can reach the emulator.
+        adb_bridge_proc = self._setup_adb_bridge(emulator_id)
+        # After adb root, adbd restarts briefly — wait until device is back online
+        # before running adb shell commands (cacerts bind-mount, etc.)
+        subprocess.run(
+            ["adb", "-s", emulator_id, "wait-for-device"],
+            capture_output=True, timeout=30, check=False,
+        )
+        self._setup_cacerts_bindmount(emulator_id, log)
+        try:
+            self._call_and_save_json(
+                lambda: client.android_mobsfy(emulator_id),
+                dynamic_dir / "mobsfy.json",
+                trace_dir,
+                "dynamic_mobsfy",
+            )
+            artifacts["mobsfy"] = self._relpath(run_dir, dynamic_dir / "mobsfy.json")
+
+            # 2. Install MobSF CA
+            self._emit("Установка MobSF CA сертификата...")
+            self._call_and_save_json(
+                lambda: client.android_root_ca("install"),
+                dynamic_dir / "root_ca_install.json",
+                trace_dir,
+                "dynamic_root_ca_install",
+            )
+            artifacts["root_ca_install"] = self._relpath(
+                run_dir, dynamic_dir / "root_ca_install.json"
+            )
+
+            # 3. Set global proxy
+            self._emit("Установка глобального прокси на эмуляторе...")
+            self._call_and_save_json(
+                lambda: client.android_global_proxy("set"),
+                dynamic_dir / "proxy_set.json",
+                trace_dir,
+                "dynamic_proxy_set",
+            )
+            artifacts["proxy_set"] = self._relpath(run_dir, dynamic_dir / "proxy_set.json")
+
+            # 4. Start dynamic analysis
+            self._emit("Запуск динамического анализа MobSF...")
+            start_resp = self._call_and_save_json(
+                lambda: client.dynamic_start_analysis(scan_hash),
+                dynamic_dir / "start.json",
+                trace_dir,
+                "dynamic_start",
+            )
+            summary.status = "running"
+            artifacts["start"] = self._relpath(run_dir, dynamic_dir / "start.json")
+
+            package_name = ""
+            if isinstance(start_resp.json_data, dict):
+                package_name = start_resp.json_data.get("package") or ""
+
+            # 5. Launch the app — dynamic_start_analysis only installs/prepares the env;
+            #    it does NOT start the activity (confirmed by MobSF API docs).
+            #    We use main_activity from the static report (passed in); fallback to monkey.
+            if package_name:
+                if main_activity:
+                    self._emit(f"Запуск приложения {main_activity}...")
+                    try:
+                        self._call_and_save_json(
+                            lambda: client.android_start_activity(scan_hash, main_activity),
+                            dynamic_dir / "start_activity.json",
+                            trace_dir,
+                            "dynamic_start_activity",
+                        )
+                    except MobSFClientError as exc:
+                        log(f"[WARN] android_start_activity: {exc}")
+                        # Fallback: launch directly via ADB
+                        subprocess.run(
+                            ["adb", "-s", emulator_id, "shell", "am", "start",
+                             "-n", f"{package_name}/{main_activity}"],
+                            capture_output=True, timeout=15,
+                        )
+                else:
+                    # No activity info — use monkey to launch
+                    subprocess.run(
+                        ["adb", "-s", emulator_id, "shell", "monkey",
+                         "-p", package_name, "-c", "android.intent.category.LAUNCHER", "1"],
+                        capture_output=True, timeout=15,
+                    )
+
+            # Wait for app to appear in process list
+            wait_sec = 60
+            if package_name:
+                self._emit(f"Ожидание запуска приложения ({wait_sec}s)...")
+                self._wait_for_app_launch_adb(emulator_id, package_name, timeout_sec=wait_sec)
+
+            # 5b. Activity tester — запускает все Activity и exported Activity через MobSF API,
+            #     чтобы спровоцировать сетевой трафик и API-вызовы без ручного взаимодействия.
+            self._emit("Запуск тестера Activity (все + exported)...")
+            for test_type, fname in (("activity", "activity_tester.json"), ("exported", "activity_tester_exported.json")):
+                try:
+                    self._call_and_save_json(
+                        lambda t=test_type: client.android_activity(scan_hash, t),
+                        dynamic_dir / fname,
+                        trace_dir,
+                        f"dynamic_{fname.replace('.json', '')}",
+                    )
+                except MobSFClientError as exc:
+                    log(f"[WARN] Activity tester ({test_type}): {exc}")
+            # Дать тестеру время отработать перед следующим шагом
+            time.sleep(15)
+
+            # 6. TLS tests (non-fatal — app may not be running)
+            if self.config.tls_tests:
+                self._emit("Выполнение TLS-проверок...")
+                try:
+                    tls_resp = self._call_and_save_json(
+                        lambda: client.android_tls_tests(scan_hash),
+                        dynamic_dir / "tls_tests.json",
+                        trace_dir,
+                        "dynamic_tls_tests",
+                    )
+                    if isinstance(tls_resp.json_data, dict):
+                        summary.tls_tests = tls_resp.json_data.get("tls_tests", tls_resp.json_data)
+                    artifacts["tls_tests"] = self._relpath(run_dir, dynamic_dir / "tls_tests.json")
+                except MobSFClientError as exc:
+                    log(f"[WARN] TLS-проверки пропущены: {exc}")
+
+            # 7. Frida instrumentation (non-fatal — requires frida-server on device)
+            if self.config.frida_steps:
+                frida_dir = dynamic_dir / "frida"
+                frida_dir.mkdir(parents=True, exist_ok=True)
+                frida_ok = False
+                try:
+                    self._emit("Запуск инструментирования Frida...")
+                    # Use frida_action="session" to attach to the already-running app.
+                    # default_hooks: api_monitor + ssl/root/debugger bypasses + clipboard
+                    # auxiliary_hooks: enum_class + string_catch for deep coverage
+                    self._call_and_save_json(
+                        lambda: client.frida_instrument(
+                            scan_hash,
+                            self.config.frida_default_hooks,
+                            self.config.frida_auxiliary_hooks,
+                            self.config.frida_code,
+                            frida_action="session",
+                        ),
+                        frida_dir / "instrument.json",
+                        trace_dir,
+                        "dynamic_frida_instrument",
+                    )
+                    frida_ok = True
+                except MobSFClientError as exc:
+                    log(f"[WARN] Frida инструментирование пропущено: {exc}")
+
+                if frida_ok:
+                    # 7b. Monkey — случайные UI-события пока Frida hooks активны.
+                    # Запускаем сразу после attach, чтобы Frida перехватила API-вызовы,
+                    # сгенерированные реальным UI-взаимодействием.
+                    # Session daemon thread на MobSF сервере живёт 45s; monkey занимает
+                    # monkey_events × monkey_throttle_ms ≈ 30s, что укладывается в окно.
+                    frida_start = time.monotonic()
+                    if package_name and self.config.monkey_events > 0:
+                        monkey_timeout = (
+                            self.config.monkey_events * self.config.monkey_throttle_ms / 1000 + 15
+                        )
+                        self._emit(
+                            f"Monkey: {self.config.monkey_events} UI-событий "
+                            f"({self.config.monkey_throttle_ms}ms между событиями)..."
+                        )
+                        try:
+                            subprocess.run(
+                                [
+                                    "adb", "-s", emulator_id, "shell", "monkey",
+                                    "-p", package_name,
+                                    "--throttle", str(self.config.monkey_throttle_ms),
+                                    "--ignore-crashes", "--ignore-timeouts",
+                                    "--ignore-security-exceptions",
+                                    str(self.config.monkey_events),
+                                ],
+                                capture_output=True,
+                                timeout=monkey_timeout,
+                            )
+                        except Exception as exc:  # pylint: disable=broad-exception-caught
+                            log(f"[WARN] monkey: {exc}")
+
+                    # Ждём оставшееся время до конца 40s окна Frida
+                    elapsed = time.monotonic() - frida_start
+                    remaining = max(0.0, 40.0 - elapsed)
+                    if remaining > 0:
+                        self._emit(f"Ожидание Frida (ещё {remaining:.0f}s)...")
+                        time.sleep(remaining)
+
+                    for label, call, fname, trace_name in (
+                        ("Сбор данных монитора API Frida",
+                         lambda: client.frida_api_monitor(scan_hash),
+                         "api_monitor.json", "dynamic_frida_api_monitor"),
+                        ("Сбор журналов Frida",
+                         lambda: client.frida_logs(scan_hash),
+                         "logs.json", "dynamic_frida_logs"),
+                        ("Сбор зависимостей приложения (Frida)",
+                         lambda: client.frida_get_dependencies(scan_hash),
+                         "dependencies.json", "dynamic_frida_dependencies"),
+                    ):
+                        try:
+                            self._emit(f"{label}...")
+                            self._call_and_save_json(
+                                call, frida_dir / fname, trace_dir, trace_name,
+                            )
+                        except MobSFClientError as exc:
+                            log(f"[WARN] {label}: {exc}")
+                    artifacts["frida"] = self._relpath(run_dir, frida_dir)
+
+            # Collect logcat before stopping via direct ADB (MobSF logcat API is SSE streaming)
+            if package_name:
+                self._emit("Сбор logcat...")
+                logcat_path = dynamic_dir / "logcat.txt"
+                self._collect_logcat_adb(emulator_id, package_name, logcat_path)
+                if logcat_path.exists():
+                    summary.logcat_lines = self._line_count(logcat_path)
+                    artifacts["logcat"] = self._relpath(run_dir, logcat_path)
+
+            # 8. Stop analysis (archives app data + collects logs server-side — can be slow)
+            self._emit("Остановка динамического анализа...")
+            try:
+                self._call_and_save_json(
+                    lambda: client.dynamic_stop_analysis(scan_hash),
+                    dynamic_dir / "stop.json",
+                    trace_dir,
+                    "dynamic_stop",
+                )
+                summary.status = "stopped"
+                artifacts["stop"] = self._relpath(run_dir, dynamic_dir / "stop.json")
+            except MobSFClientError as exc:
+                log(f"[WARN] dynamic_stop: {exc}")
+
+            # 9. Fetch final report
+            self._emit("Получение JSON-отчёта динамического анализа...")
+            self._call_and_save_json(
+                lambda: client.dynamic_report_json(scan_hash),
+                dynamic_dir / "report.json",
+                trace_dir,
+                "dynamic_report_json",
+            )
+            artifacts["report_json"] = self._relpath(run_dir, dynamic_dir / "report.json")
+
+            return summary, artifacts
+        finally:
+            if adb_bridge_proc is not None:
+                adb_bridge_proc.terminate()
+
+    def _check_mobsf_api_level(self, emulator_serial: str) -> None:
+        """Raise MobSFClientError if the emulator API level exceeds MobSF's supported max (30)."""
+        MOBSF_MAX_API = 30
+        try:
+            result = subprocess.run(
+                ["adb", "-s", emulator_serial, "shell", "getprop", "ro.build.version.sdk"],
+                capture_output=True, text=True, timeout=10,
+            )
+            api_str = result.stdout.strip()
+            if api_str.isdigit() and int(api_str) > MOBSF_MAX_API:
+                raise MobSFClientError(
+                    f"MobSF динамический анализ не поддерживает API {api_str} "
+                    f"(максимум API {MOBSF_MAX_API} / Android 11). "
+                    f"Создайте AVD с API ≤ {MOBSF_MAX_API} или используйте MobSF ≥ 4.5."
+                )
+        except MobSFClientError:
+            raise
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass  # если adb недоступен, продолжаем — mobsfy сам упадёт с понятной ошибкой
+
+    def _setup_adb_bridge(self, emulator_serial: str) -> "subprocess.Popen | None":
+        """Enable ADB TCP mode and start socat bridge so Docker can reach the emulator.
+
+        QEMU binds the emulator ADB port only on 127.0.0.1:5555. MobSF connects via
+        host.docker.internal:5555 (= Docker bridge IP, e.g. 172.17.0.1). socat forwards
+        bridge_ip:5555 → 127.0.0.1:5555 to bridge the gap.
+        """
+        from analysis.mobsf import MOBSF_CONTAINER_NAME  # noqa: PLC0415
+
+        # Switch emulator adbd to TCP mode (idempotent)
+        subprocess.run(
+            ["adb", "-s", emulator_serial, "tcpip", "5555"],
+            capture_output=True, timeout=15,
+        )
+        time.sleep(1)  # adbd restarts briefly
+
+        # Get the IP that host.docker.internal resolves to inside the container
+        insp = subprocess.run(
+            ["docker", "inspect", "-f",
+             "{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}",
+             MOBSF_CONTAINER_NAME],
+            capture_output=True, text=True, timeout=10,
+        )
+        bridge_ip = insp.stdout.strip() or "172.17.0.1"
+
+        try:
+            proc = subprocess.Popen(
+                ["socat",
+                 f"TCP-LISTEN:5555,bind={bridge_ip},fork,reuseaddr",
+                 "TCP:127.0.0.1:5555"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            time.sleep(0.5)
+            self._emit(f"ADB bridge: {bridge_ip}:5555 → 127.0.0.1:5555 (pid={proc.pid})")
+            return proc
+        except FileNotFoundError:
+            self._emit("[WARN] socat не найден — ADB bridge недоступен (apt-get install socat)")
+            return None
+
+    def _setup_cacerts_bindmount(self, serial: str, log: Callable[[str], None]) -> None:
+        """Bind-mount /system/etc/security/cacerts over a tmpfs copy so MobSF can push its CA.
+
+        On API 30 the root partition is RO (dm-verity). MobSF's install_mobsf_ca() pushes its
+        CA cert into /system/etc/security/cacerts which fails with EROFS. Fix: copy the existing
+        system certs into /data/local/tmp/cacerts and bind-mount that directory back over the
+        system path, making it writable without touching the real partition.
+        """
+        adb = ["adb", "-s", serial]
+        try:
+            # Check writeability directly — most reliable across Android versions.
+            # /proc/mounts shows the block device as source (not the tmpfs dir), so grep on
+            # source path is unreliable. A write test is always correct.
+            chk = subprocess.run(
+                adb + ["shell",
+                       "touch /system/etc/security/cacerts/.tapka_wtest >/dev/null 2>&1"
+                       " && rm -f /system/etc/security/cacerts/.tapka_wtest && echo WRITABLE"
+                       " || echo READONLY"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if "WRITABLE" in (chk.stdout or ""):
+                log("cacerts bind-mount уже активен (/system/etc/security/cacerts writable)")
+                return
+            r = subprocess.run(
+                adb + ["shell",
+                       "mkdir -p /data/local/tmp/cacerts"
+                       " && cp /system/etc/security/cacerts/* /data/local/tmp/cacerts/ >/dev/null 2>&1; "
+                       "chmod 755 /data/local/tmp/cacerts"
+                       " && mount --bind /data/local/tmp/cacerts /system/etc/security/cacerts"],
+                capture_output=True, text=True, timeout=20,
+            )
+            if r.returncode == 0:
+                log("cacerts bind-mount установлен (/system/etc/security/cacerts writable)")
+            else:
+                log(f"[WARN] cacerts bind-mount не удался: {r.stderr.strip() or r.stdout.strip()}")
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            log(f"[WARN] cacerts bind-mount: {exc}")
 
     def _run_quark(
         self,

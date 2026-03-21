@@ -112,6 +112,14 @@ class SectionV2(BaseModel):
     data: Any | None = None
 
 
+class SecurityScoreV2(BaseModel):
+    total: float
+    risk_label: str
+    stage1_contribution: float | None = None
+    stage2_contribution: float | None = None
+    stage3_contribution: float | None = None
+
+
 class ReportV2(BaseModel):
     schema_version: str = Field(default="tapka.report.v2", alias="schema")
     report_type: str = "stage"
@@ -126,4 +134,5 @@ class ReportV2(BaseModel):
     sections: list[SectionV2] = Field(default_factory=list)
     status: ReportStatusV2 = "ok"
     notes: list[str] = Field(default_factory=list)
-    stage2_data: dict = Field(default_factory=dict)
+    stage2_data: dict | None = Field(default=None)  # BUG-03/D3 fix
+    security_score: SecurityScoreV2 | None = None

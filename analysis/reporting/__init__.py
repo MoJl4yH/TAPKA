@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import mimetypes
+from enum import Enum
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -33,6 +34,11 @@ from models.report_v2 import (
     ToolRunV2,
     ToolStatusV2,
 )
+
+class ReportType(str, Enum):
+    STANDARD = "standard"
+    EXTENDED = "extended"
+
 
 REPORT_FILENAMES = {
     STAGE_STATIC: ("stage1_report.json", "stage1_report.html"),
@@ -140,6 +146,34 @@ ENDPOINT_DENYLIST = {
     "learn.microsoft.com",
     "github.com",
 }
+
+# BUG-26: benign domain suffixes — subdomains also match (e.g. api.github.com)
+ENDPOINT_BENIGN_SUFFIXES = frozenset({
+    # Google / Android platform
+    "google.com", "googleapis.com", "gstatic.com", "googleusercontent.com",
+    "android.com", "gvt1.com", "gvt2.com", "google-analytics.com",
+    "googlesyndication.com", "doubleclick.net",
+    # Firebase / GCP
+    "firebase.com", "firebaseapp.com", "firebaseio.com", "firebasestorage.googleapis.com",
+    "crashlytics.com",
+    # Apple
+    "apple.com", "icloud.com",
+    # Social / Auth
+    "facebook.com", "fbcdn.net", "instagram.com", "twitter.com", "t.co",
+    "accounts.google.com",
+    # CDN / infra
+    "amazonaws.com", "cloudfront.net", "akamaized.net", "fastly.net",
+    "cloudflare.com", "azureedge.net", "microsoft.com",
+    # Developer tooling / docs
+    "github.com", "raw.githubusercontent.com", "githubusercontent.com",
+    "stackoverflow.com", "apache.org", "maven.org", "repo1.maven.org",
+    "jcenter.bintray.com", "dl.google.com", "plugins.gradle.org",
+    # Ad/analytics SDKs
+    "appsflyer.com", "branch.io", "adjust.com", "mixpanel.com",
+    "segment.com", "amplitude.com",
+    # XML / schema namespaces commonly in resources
+    "xmlpull.org", "www.w3.org", "www.ietf.org",
+})
 
 ENDPOINT_EXAMPLE_LIMIT = 3
 
@@ -386,7 +420,15 @@ def _is_noise_url(value: str) -> bool:
         host = ""
     if not host:
         return False
-    return host.lower() in ENDPOINT_DENYLIST
+    host_lower = host.lower()
+    # BUG-26: exact match against denylist
+    if host_lower in ENDPOINT_DENYLIST:
+        return True
+    # BUG-26: suffix match against benign domain list (covers subdomains)
+    for suffix in ENDPOINT_BENIGN_SUFFIXES:
+        if host_lower == suffix or host_lower.endswith("." + suffix):
+            return True
+    return False
 
 
 def _collect_endpoints(findings: list[Finding]) -> tuple[dict[str, dict], dict[str, dict]]:
@@ -678,12 +720,24 @@ class ReportManager:
             confidence = f.get("confidence", "C1")
             if confidence not in ("C1", "C2", "C3"):
                 confidence = "C1"
-            # Map confidence to severity hint
-            sev: SeverityHintV2 = "info"
-            if confidence == "C3":
-                sev = "high"
-            elif confidence == "C2":
-                sev = "medium"
+            # Compute severity via SeverityEngine impact_table when category is known.
+            base = SeverityEngine.impact_table.get(finding_id, 0)
+            if base > 0:
+                conf_mult = SeverityEngine.confidence_multipliers.get(confidence, 0.5)
+                item_score = base * conf_mult
+                computed = SeverityEngine._severity_for_score(item_score)  # pylint: disable=protected-access
+                floor = SeverityEngine.severity_floor.get(finding_id)
+                if floor and SeverityEngine._severity_rank(computed) < SeverityEngine._severity_rank(floor):  # pylint: disable=protected-access
+                    sev: SeverityHintV2 = floor  # type: ignore[assignment]
+                else:
+                    sev = computed  # type: ignore[assignment]
+            else:
+                # Unknown category — fall back to confidence-based mapping
+                sev = "info"
+                if confidence == "C3":
+                    sev = "high"
+                elif confidence == "C2":
+                    sev = "medium"
             title = f.get("title", "")
             if not title:
                 continue
@@ -1386,7 +1440,9 @@ class ReportManager:
     def _indicator_index(self, indicators: list[IndicatorV2]) -> dict[str, list[str]]:
         index: dict[str, list[str]] = {}
         for indicator in indicators:
+            # BUG-36: index by both value and type so findings can match on either
             index.setdefault(indicator.value, []).append(indicator.id)
+            index.setdefault(indicator.type, []).append(indicator.id)
         return index
 
     def _build_stage1_findings(
@@ -2564,3 +2620,124 @@ class ReportManager:
             )
 
         return refs
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Combined-report helpers
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def load_all_findings(self, project_id: str) -> dict[str, list[FindingV2]]:
+        """Собирает FindingV2 из run-директорий всех стадий одного проекта.
+
+        Возвращает словарь ``{stage_name: [FindingV2, ...]}`` для вычисления
+        SecurityScore и формирования combined-отчёта.
+        """
+        result: dict[str, list[FindingV2]] = {}
+        stage_map = {
+            "stage1": STAGE_STATIC,
+            "stage2": STAGE_DYNAMIC,
+            "stage3": STAGE_CROSS_TOOL,
+        }
+        for key, stage in stage_map.items():
+            latest = self.storage.get_latest_run(project_id, stage)
+            if not latest:
+                continue
+            run, run_dir = latest
+            # Stage1: load from findings.json → Finding → FindingV2 via SeverityEngine
+            if key == "stage1":
+                raw_findings = self.load_findings(run, run_dir)
+                findings_v2 = self._build_stage1_findings_v2_simple(run_dir, raw_findings)
+            else:
+                # Stage2/3: load from stage report JSON
+                json_path, _ = self.report_paths(run_dir, stage)
+                if json_path.exists():
+                    try:
+                        payload = json.loads(json_path.read_text(encoding="utf-8"))
+                        report = ReportV2.model_validate(payload)
+                        findings_v2 = report.findings
+                    except (json.JSONDecodeError, ValueError, OSError):
+                        findings_v2 = []
+                else:
+                    findings_v2 = []
+            if findings_v2:
+                result[key] = findings_v2
+        return result
+
+    def _build_stage1_findings_v2_simple(
+        self, run_dir: Path, findings: list[Finding]
+    ) -> list[FindingV2]:
+        """Минимальный вариант конвертации Finding → FindingV2 (без индикаторов)."""
+        indicator_index: dict[str, list[str]] = {}
+        return self._build_stage1_findings(findings, indicator_index)
+
+    def generate_combined_report(
+        self,
+        project_id: str,
+        report_type: ReportType = ReportType.STANDARD,
+    ) -> ReportV2:
+        """Создаёт сводный отчёт по всем стадиям с SecurityScore.
+
+        Standard: только severity in (high, medium), без индикаторов.
+        Extended: все findings и индикаторы.
+        """
+        from analysis.scoring import compute_score
+        from models.report_v2 import SecurityScoreV2
+
+        findings_by_stage = self.load_all_findings(project_id)
+        security = compute_score(findings_by_stage)
+
+        score_v2 = SecurityScoreV2(
+            total=security.total,
+            risk_label=security.risk_label,
+            stage1_contribution=security.breakdown.get("stage1"),
+            stage2_contribution=security.breakdown.get("stage2"),
+            stage3_contribution=security.breakdown.get("stage3"),
+        )
+
+        all_findings: list[FindingV2] = []
+        all_indicators: list[IndicatorV2] = []
+
+        for stage_findings in findings_by_stage.values():
+            if report_type == ReportType.STANDARD:
+                all_findings.extend(
+                    f for f in stage_findings if f.severity in ("high", "medium")
+                )
+            else:
+                all_findings.extend(stage_findings)
+
+        # For Extended: collect indicators from latest Stage1 run
+        if report_type == ReportType.EXTENDED:
+            latest1 = self.storage.get_latest_run(project_id, STAGE_STATIC)
+            if latest1:
+                run1, run_dir1 = latest1
+                raw1 = self.load_findings(run1, run_dir1)
+                all_indicators = self._build_stage1_indicators(run_dir1, raw1)
+
+        # Build minimal project ref from any available run
+        project = self.storage.load_project(project_id)
+        dummy_run_dir = self.storage.get_active_version_dir(project_id)
+        project_ref = self._project_ref(project, STAGE_OVERALL, dummy_run_dir)
+
+        run_ref = RunInfoV2(
+            run_id="combined",
+            stage=STAGE_OVERALL,
+            status="ok",
+            started_at=now_utc_iso(),
+            finished_at=now_utc_iso(),
+            run_dir=str(dummy_run_dir),
+        )
+
+        return ReportV2(
+            report_type="combined",
+            stage=STAGE_OVERALL,
+            generated_at=now_utc_iso(),
+            project=project_ref,
+            run=run_ref,
+            tools=[],
+            artifacts=[],
+            indicators=all_indicators,
+            findings=all_findings,
+            sections=[],
+            status="ok",
+            notes=[f"report_type={report_type.value}", f"stages_analyzed={list(findings_by_stage.keys())}"],
+            security_score=score_v2,
+        )

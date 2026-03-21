@@ -434,7 +434,13 @@ class Stage1StaticRunner:
         },
         {
             "category": "anomaly_emulator_detection",
-            "pattern": r"\b(goldfish|ranchu|genymotion|generic_x86|Andy|Droid4X|nox|bluestacks)\b|Build\.(FINGERPRINT|HARDWARE|MODEL|PRODUCT).*(?:generic|sdk|emulator|vbox)",
+            "pattern": (
+                r"\b(goldfish|ranchu|genymotion|generic_x86|Andy|Droid4X|nox|bluestacks)\b"
+                r"|Build\.(FINGERPRINT|HARDWARE|MODEL|PRODUCT|BOARD|BRAND|MANUFACTURER)"
+                r"(?i:.*?(?:generic|sdk|emulator|vbox86|unknown))"
+                r"|java\.vm\.name|000000000000000"
+                r"|\b(?:isEmulator|detectEmulator|checkEmulator|isRunningOnEmulator)\b"
+            ),
             "targets": ("jadx",),
             "confidence": "C2",
             "evidence_type": "code",
@@ -524,6 +530,18 @@ class Stage1StaticRunner:
             "source": "sql_injection",
         },
         # --- Sensitive data logging ---
+        # C2: value is passed directly into log (variable or concatenation after keyword)
+        # BUG-39: split into C2 (actual value logged) and C1 (concept mention)
+        {
+            "category": "sec_log_sensitive_data",
+            "pattern": r"Log\.[dviwe]\([^)]*(?i)(password|passwd|token|secret|api.?key|credential)\s*[=+\[,]",
+            "targets": ("jadx",),
+            "confidence": "C2",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "log_sensitive_value",
+        },
+        # C1: keyword mentioned in log message (may be concept, not actual value)
         {
             "category": "sec_log_sensitive_data",
             "pattern": r"Log\.[dviwe]\([^)]*(?i)(password|passwd|token|secret|apikey|api_key|credential|ssn|credit.?card)",
@@ -553,6 +571,22 @@ class Stage1StaticRunner:
             "evidence_type": "code",
             "tags": set(),
             "source": "sharedprefs_sensitive_split",
+        },
+        # --- Keyboard autocomplete cache on sensitive fields (BUG-29) ---
+        # Detects password/sensitive fields missing inputType=textNoSuggestions or
+        # IME_FLAG_NO_PERSONALIZED_LEARNING — keyboard caches input via autocomplete.
+        {
+            "category": "sec_keyboard_cache_sensitive",
+            "pattern": (
+                r'inputType\s*=\s*"(?!.*(?:textPassword|textVisiblePassword|numberPassword'
+                r'|textNoSuggestions|textEmailAddress))[^"]*(?i:(?:user|login|email|account|name))[^"]*"'
+            ),
+            "targets": ("apktool",),
+            "scope": "app_res",
+            "confidence": "C1",
+            "evidence_type": "resource",
+            "tags": set(),
+            "source": "keyboard_cache",
         },
         # --- SMS sending ---
         {
@@ -1098,6 +1132,43 @@ class Stage1StaticRunner:
         )
         command_results.append(yara_result)
         findings.extend(self._yara_findings(paths.logs_dir, paths.run_dir))
+
+        # semgrep — запускаем на JADX-выводе, если он есть
+        _semgrep_t0 = time.monotonic()
+        semgrep_findings = self._run_semgrep_findings(paths)
+        findings.extend(semgrep_findings)
+        if paths.jadx_dir.exists():
+            _semgrep_dur = round(time.monotonic() - _semgrep_t0, 2)
+            _semgrep_out = paths.run_dir / "tools" / "semgrep"
+            command_results.append(CommandResult(
+                tool="semgrep",
+                argv=["semgrep"],
+                cwd=str(paths.jadx_dir),
+                return_code=0,
+                duration_sec=_semgrep_dur,
+                stdout_path=str(_semgrep_out / "results.json"),
+                stderr_path=str(_semgrep_out / "semgrep.log"),
+                status="success",
+            ))
+
+        # checksec — анализ .so библиотек
+        _checksec_t0 = time.monotonic()
+        checksec_findings = self._run_checksec_findings(paths, so_files)
+        findings.extend(checksec_findings)
+        if so_files:
+            _checksec_dur = round(time.monotonic() - _checksec_t0, 2)
+            _checksec_out = paths.run_dir / "tools" / "checksec"
+            command_results.append(CommandResult(
+                tool="checksec",
+                argv=["checksec"],
+                cwd=str(paths.apktool_dir),
+                return_code=0,
+                duration_sec=_checksec_dur,
+                stdout_path=str(_checksec_out / "checksec_results.json"),
+                stderr_path=str(_checksec_out / "checksec.log"),
+                status="success",
+            ))
+
         findings = self._post_process_findings(findings, paths.run_dir)
         SeverityEngine.apply(findings)
 
@@ -1531,8 +1602,6 @@ class Stage1StaticRunner:
                     normalized_category = "secret_password_like"
                 else:
                     normalized_category = "secret_hardcoded_token_or_apikey"
-            if category == "signal_download_manager":
-                normalized_category = "signal_download_manager"
             findings.append(
                 self._make_finding(
                     FindingSpec(
@@ -2890,3 +2959,144 @@ class Stage1StaticRunner:
             seen.add(key)
             deduped.append(finding)
         return deduped
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # semgrep integration
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _run_semgrep_findings(self, paths: Stage1Paths) -> list[Finding]:
+        """Запускает semgrep на JADX-декомпилированном коде и возвращает Finding-объекты."""
+        if not paths.jadx_dir.exists():
+            return []
+        try:
+            from analysis.semgrep.runner import run_semgrep
+
+            semgrep_out = paths.run_dir / "tools" / "semgrep"
+            sg_findings = run_semgrep(
+                jadx_src_dir=paths.jadx_dir,
+                output_dir=semgrep_out,
+                on_progress=None,
+            )
+        except Exception:  # pylint: disable=broad-exception-caught
+            return []
+
+        findings: list[Finding] = []
+        for sgf in sg_findings:
+            rel_path = sgf.file
+            try:
+                rel_path = str(Path(sgf.file).relative_to(paths.jadx_dir))
+            except (ValueError, TypeError):
+                pass
+            findings.append(
+                self._make_finding(
+                    FindingSpec(
+                        category=sgf.category,
+                        evidence=sgf.message[:300] if sgf.message else sgf.rule_id,
+                        file_path=rel_path,
+                        line=sgf.line if sgf.line else None,
+                        confidence="C2",
+                        evidence_type="code",
+                        tags={"semgrep"},
+                        sources=[f"semgrep:{sgf.rule_id}"],
+                        source=f"semgrep:{sgf.rule_id}",
+                    ),
+                    run_dir=paths.run_dir,
+                )
+            )
+        return findings
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # checksec integration
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _run_checksec_findings(self, paths: Stage1Paths, so_files: list[Path]) -> list[Finding]:
+        """Запускает checksec на .so файлах и возвращает Finding-объекты."""
+        if not so_files:
+            return []
+        try:
+            from analysis.checksec.runner import analyze_so_files
+
+            checksec_out = paths.run_dir / "tools" / "checksec"
+            reports = analyze_so_files(
+                so_dir=paths.apktool_dir,
+                output_dir=checksec_out,
+                on_progress=None,
+            )
+        except Exception:  # pylint: disable=broad-exception-caught
+            return []
+
+        findings: list[Finding] = []
+        for r in reports:
+            if r.exploitability == "low":
+                continue  # только medium и high
+
+            try:
+                rel_path = str(Path(r.path).relative_to(paths.apktool_dir))
+            except (ValueError, TypeError):
+                rel_path = r.path
+
+            # NX disabled
+            if not r.nx:
+                findings.append(
+                    self._make_finding(
+                        FindingSpec(
+                            category="checksec_nx_disabled",
+                            evidence=f"{r.name}: NX (Non-Executable stack) не включён",
+                            file_path=rel_path,
+                            confidence="C2",
+                            evidence_type="binary",
+                            tags={"checksec"},
+                            sources=[f"checksec:{r.name}"],
+                        ),
+                        run_dir=paths.run_dir,
+                    )
+                )
+            # Stack canary missing
+            if not r.canary:
+                findings.append(
+                    self._make_finding(
+                        FindingSpec(
+                            category="checksec_no_canary",
+                            evidence=f"{r.name}: стековый canary отсутствует",
+                            file_path=rel_path,
+                            confidence="C2",
+                            evidence_type="binary",
+                            tags={"checksec"},
+                            sources=[f"checksec:{r.name}"],
+                        ),
+                        run_dir=paths.run_dir,
+                    )
+                )
+            # PIE missing (only report for high exploitability)
+            if not r.pie and r.exploitability == "high":
+                findings.append(
+                    self._make_finding(
+                        FindingSpec(
+                            category="checksec_no_pie",
+                            evidence=f"{r.name}: PIE (Position Independent Executable) не включён",
+                            file_path=rel_path,
+                            confidence="C1",
+                            evidence_type="binary",
+                            tags={"checksec"},
+                            sources=[f"checksec:{r.name}"],
+                        ),
+                        run_dir=paths.run_dir,
+                    )
+                )
+            # RELRO missing (only report for high exploitability)
+            if r.relro == "no" and r.exploitability == "high":
+                findings.append(
+                    self._make_finding(
+                        FindingSpec(
+                            category="checksec_no_relro",
+                            evidence=f"{r.name}: RELRO отсутствует (GOT перезаписываем)",
+                            file_path=rel_path,
+                            confidence="C1",
+                            evidence_type="binary",
+                            tags={"checksec"},
+                            sources=[f"checksec:{r.name}"],
+                        ),
+                        run_dir=paths.run_dir,
+                    )
+                )
+        return findings

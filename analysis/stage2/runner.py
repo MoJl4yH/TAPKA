@@ -127,6 +127,8 @@ class Stage2DynamicRunner:
         tools_index: list[dict] = []
         traffic_started = False
         pcap_pulled = False
+        _mitm_proc = None
+        emulator_serial = ""
         pkg_name = ""
         app_uid = ""
         app_pid = ""
@@ -142,7 +144,7 @@ class Stage2DynamicRunner:
             # ----------------------------------------------------------------
             boot_start = time.monotonic()
             log("Шаг 1: запуск эмулятора...")
-            emulator.start(headless=True)
+            emulator.start(headless=True, writable_system=self.config.enable_https_interception)
             booted = emulator.wait_boot(timeout_sec=self.config.emulator_boot_timeout_sec)
             if not booted:
                 raise RuntimeError(
@@ -219,6 +221,34 @@ class Stage2DynamicRunner:
                 "fs_diff_path": install_diff.fs_diff_path,
                 "packages_diff_path": install_diff.packages_diff_path,
             }
+
+            # ----------------------------------------------------------------
+            # Step 5.5: HTTPS interception via mitmproxy (optional)
+            # ----------------------------------------------------------------
+            if self.config.enable_https_interception:
+                from analysis.stage2.mitm import (  # noqa: PLC0415
+                    install_mitm_ca_to_emulator,
+                    set_emulator_proxy,
+                    start_mitmproxy,
+                )
+                try:
+                    emulator_serial = self._resolve_emulator_serial(adb)
+                    install_mitm_ca_to_emulator(emulator_serial, on_progress=log)
+                    set_emulator_proxy(
+                        emulator_serial, port=self.config.mitm_port, on_progress=log
+                    )
+                    mitm_dump = (
+                        Path(self.config.mitm_dump_path)
+                        if self.config.mitm_dump_path
+                        else None
+                    )
+                    _mitm_proc = start_mitmproxy(
+                        port=self.config.mitm_port, dump_path=mitm_dump
+                    )
+                    log("HTTPS-перехват активирован через mitmproxy")
+                except Exception as _mitm_exc:  # pylint: disable=broad-exception-caught
+                    log(f"[WARN] mitmproxy не запущен: {_mitm_exc}")
+                    _mitm_proc = None
 
             # ----------------------------------------------------------------
             # Step 6: Start logcat + traffic capture
@@ -300,6 +330,15 @@ class Stage2DynamicRunner:
 
             if traffic_started:
                 pcap_pulled = traffic.stop_and_pull(pcap_local)
+
+            if _mitm_proc is not None:
+                _mitm_proc.terminate()
+                try:
+                    from analysis.stage2.mitm import unset_emulator_proxy  # noqa: PLC0415
+                    unset_emulator_proxy(emulator_serial)
+                except Exception:  # pylint: disable=broad-exception-caught
+                    pass
+
             capture_end_ts = time.monotonic()  # end of capture window (before post-processing)
 
             idx = write_tool_bundle(
@@ -490,12 +529,34 @@ class Stage2DynamicRunner:
             log(f"Не удалось сформировать отчёт: {exc}")
 
         write_run_finished(ctx, now_utc_iso(), tools_index)
+        # BUG-06: persist run.status to run.json so reports can read it
+        try:
+            import json as _json  # noqa: PLC0415
+            _run_path = ctx.run_dir / "run.json"
+            if _run_path.exists():
+                _data = _json.loads(_run_path.read_text(encoding="utf-8"))
+                _data["status"] = run.status or "Done"
+                _run_path.write_text(_json.dumps(_data, indent=2), encoding="utf-8")
+        except (OSError, _json.JSONDecodeError):  # pylint: disable=broad-exception-caught
+            pass
         log("Запуск этапа 2 финализирован.")
         return run
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _resolve_emulator_serial(self, adb: str) -> str:
+        """Return the serial of the first connected Android device from adb devices."""
+        try:
+            _, out, _ = run_command_capture([adb, "devices"], timeout=10)
+            for line in out.splitlines()[1:]:
+                parts = line.split()
+                if len(parts) >= 2 and parts[1] == "device":
+                    return parts[0]
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+        return "emulator-5554"
 
     def _resolve_uid(self, pkg_name: str, adb: str, log: Callable) -> str:
         """Resolve UID for installed package via pm list packages -U."""
@@ -681,6 +742,44 @@ class Stage2DynamicRunner:
             "sec_cleartext_http_protocol": (
                 lambda: "sec_runtime_cleartext_transport" in alert_ids,
                 "network_alert:sec_runtime_cleartext_transport",
+            ),
+            # BUG-30: extended AppOps coverage
+            "ndv_mic_eavesdropping": (
+                lambda: "RECORD_AUDIO" in allowed_ops,
+                "appops:RECORD_AUDIO=allow",
+            ),
+            "ndv_camera_surveillance": (
+                lambda: "CAMERA" in allowed_ops,
+                "appops:CAMERA=allow",
+            ),
+            "ndv_geo_tracking_foreground": (
+                lambda: "ACCESS_FINE_LOCATION" in allowed_ops or "ACCESS_COARSE_LOCATION" in allowed_ops,
+                "appops:ACCESS_FINE_LOCATION=allow or ACCESS_COARSE_LOCATION=allow",
+            ),
+            "ndv_geo_tracking_background": (
+                lambda: "ACCESS_BACKGROUND_LOCATION" in allowed_ops,
+                "appops:ACCESS_BACKGROUND_LOCATION=allow",
+            ),
+            "ndv_contacts_access": (
+                lambda: "READ_CONTACTS" in allowed_ops,
+                "appops:READ_CONTACTS=allow",
+            ),
+            "ndv_sms_intercept": (
+                lambda: "READ_SMS" in allowed_ops or "RECEIVE_SMS" in allowed_ops,
+                "appops:READ_SMS=allow or RECEIVE_SMS=allow",
+            ),
+            "ndv_sms_send": (
+                lambda: "SEND_SMS" in allowed_ops,
+                "appops:SEND_SMS=allow",
+            ),
+            # BUG-33: Stage2↔Stage1 correlation improvements
+            "ndv_notification_listener": (
+                lambda: "BIND_NOTIFICATION_LISTENER_SERVICE" in allowed_ops,
+                "appops:BIND_NOTIFICATION_LISTENER_SERVICE=allow",
+            ),
+            "ndv_screen_capture_mediaprojection": (
+                lambda: "PROJECT_MEDIA" in allowed_ops,
+                "appops:PROJECT_MEDIA=allow",
             ),
         }
 

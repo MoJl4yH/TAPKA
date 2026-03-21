@@ -25,7 +25,7 @@ from models import Run
 
 @dataclass
 class Stage3ApkleaksConfig:
-    apkleaks_timeout_sec: int | None = 120
+    apkleaks_timeout_sec: int | None = None
     apkleaks_patterns_json: str | None = None
     apkleaks_args_string: str | None = None
 

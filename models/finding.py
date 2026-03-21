@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 
 SeverityLevel = Literal["info", "low", "medium", "high"]
 ConfidenceLevel = Literal["C1", "C2", "C3"]
-EvidenceType = Literal["string", "code", "manifest", "signing"]
+EvidenceType = Literal["string", "code", "manifest", "signing", "binary", "resource"]
 
 
 class Finding(BaseModel):

@@ -5,12 +5,15 @@ from dataclasses import dataclass, field
 
 @dataclass
 class Stage2Config:
-    avd_name: str = "tapka_api35"
-    api_level: int = 35
-    runtime_duration_sec: int = 60
+    avd_name: str = "tapka_api30"
+    api_level: int = 30
+    runtime_duration_sec: int = 180
     emulator_boot_timeout_sec: int = 180
     adb_timeout_sec: int = 30
     zeek_enabled: bool = True
+    enable_https_interception: bool = False  # Enable mitmproxy HTTPS interception
+    mitm_port: int = 8888                    # mitmdump listen port
+    mitm_dump_path: str | None = None        # Path for .mitm flow dump file (optional)
 
 
 @dataclass

@@ -216,7 +216,11 @@ rule ANDROID_TLS_TrustAll_or_MITM_Indicators
     $mitm2 = "mitmproxy" nocase ascii
     $mitm3 = "charles" nocase ascii
   condition:
-    ( ($tm1 and $tm2 and $ssl1) or ($hnv1 and $ret) ) and ($ok1 or $ssl1) or any of ($mitm*)
+    (
+        ( ($tm1 and $tm2 and $ssl1) or ($hnv1 and $ret) ) and ($ok1 or $ssl1)
+    ) or (
+        any of ($mitm*) and ($ok1 or $ssl1 or $tm1 or $hnv1)
+    )
 }
 
 rule ANDROID_Combined_Spy_Profile_Strong

@@ -50,3 +50,9 @@ addendum4_quark_oom_fix_2.md
 .pylintrc
 .review_md/*
 tests/
+.claude
+.claude-octopus
+.review_md
+android-insecurebankv2/
+docs/
+test_apk_file
