@@ -64,15 +64,22 @@ from ui.style import get_style
 class Stage1Worker(QThread):
     finished = Signal(object)
     failed = Signal(str)
-    progress = Signal(object)
+    progress = Signal(str)   # JSON-encoded dict — avoids _pythonToCppCopy Qt warnings
 
     def __init__(self, storage: Storage, project_id: str):
         super().__init__()
         self.storage = storage
         self.project_id = project_id
 
+    def _emit_progress(self, payload: object) -> None:
+        import json as _json
+        if isinstance(payload, dict):
+            self.progress.emit(_json.dumps(payload))
+        else:
+            self.progress.emit(_json.dumps({"message": str(payload)}))
+
     def run(self) -> None:
-        runner = Stage1StaticRunner(self.storage, on_progress=self.progress.emit)
+        runner = Stage1StaticRunner(self.storage, on_progress=self._emit_progress)
         try:
             run = runner.run(self.project_id)
             self.finished.emit(run)
@@ -1984,11 +1991,20 @@ class MainWindow(QMainWindow):
         if self.pipeline_running:
             return
         from analysis.pipeline import PipelineConfig
+        from analysis.stage3_batch_runner import Stage3BatchConfig
+        from analysis.mobsf.stage3_runner import Stage3Config
         avd_name = self.stage2_avd_combo.currentText().strip() if hasattr(self, "stage2_avd_combo") else "tapka_api30"
         config = PipelineConfig(
             run_stage2=True,
             avd_name=avd_name or "tapka_api30",
             run_stage3=True,
+            stage3_config=Stage3BatchConfig(
+                mobsf_config=Stage3Config(
+                    enable_dynamic_android=True,
+                    enable_dynamic_v2=True,
+                    frida_steps=True,
+                ),
+            ),
         )
         self.pipeline_running = True
         self.pipeline_worker = FullPipelineWorker(
@@ -3910,7 +3926,12 @@ class MainWindow(QMainWindow):
             self.tabs.setCurrentIndex(1)
         self._render_log_view()
 
-    def _on_progress(self, payload: dict) -> None:
+    def _on_progress(self, payload_json: str) -> None:
+        import json as _json
+        try:
+            payload = _json.loads(payload_json)
+        except (ValueError, TypeError):
+            payload = {"message": str(payload_json)}
         completed = int(payload.get("completed", 0))
         total = int(payload.get("total", 0)) or 1
         message = payload.get("message", "Выполняется...")

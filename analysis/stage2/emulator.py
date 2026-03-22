@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 import time
 from typing import Callable
@@ -14,11 +16,15 @@ class EmulatorManager:
         avd_name: str = "tapka_api30",
         adb_timeout_sec: int = 30,
         on_log: Callable[[str], None] | None = None,
+        cpu_cores: int | None = None,
     ) -> None:
         self.avd_name = avd_name
         self.adb_timeout_sec = adb_timeout_sec
         self._log = on_log or (lambda m: None)
         self._proc: subprocess.Popen | None = None  # type: ignore[type-arg]
+        # cpu_cores=None → auto (os.cpu_count() // 2, min 1)
+        total = os.cpu_count() or 2
+        self.cpu_cores: int = cpu_cores if cpu_cores is not None else max(1, total // 2)
 
     def _kill_existing(self) -> None:
         """Kill any running emulator and wait until adb sees no devices."""
@@ -39,18 +45,42 @@ class EmulatorManager:
                 break
             time.sleep(1)
 
+    @staticmethod
+    def kvm_available() -> bool:
+        """Return True if /dev/kvm is accessible (hardware acceleration available)."""
+        return os.access("/dev/kvm", os.R_OK | os.W_OK)
+
     def start(self, headless: bool = True, writable_system: bool = False) -> None:
+        if not self.kvm_available():
+            self._log(
+                "WARN: /dev/kvm недоступен — эмулятор запустится без KVM. "
+                "Загрузка может занять 5–10 минут."
+            )
         self._kill_existing()
         emulator_bin = find_sdk_bin("emulator")
         cmd = [
             emulator_bin, "-avd", self.avd_name,
             "-wipe-data", "-no-snapshot-save", "-no-boot-anim", "-netfast",
+            "-cores", str(self.cpu_cores),
         ]
         if writable_system:
             cmd.append("-writable-system")
         if headless:
             cmd.append("-no-window")
-        self._log(f"Starting emulator: {' '.join(cmd)}")
+
+        # Pin emulator process to first cpu_cores physical cores via taskset.
+        # This prevents QEMU from monopolising all host CPUs and destabilising the VM.
+        taskset_bin = shutil.which("taskset")
+        if taskset_bin:
+            cpu_mask = ",".join(str(i) for i in range(self.cpu_cores))
+            cmd = [taskset_bin, "-c", cpu_mask] + cmd
+            self._log(
+                f"Starting emulator (pinned to cores {cpu_mask}, "
+                f"-cores {self.cpu_cores}): {emulator_bin} -avd {self.avd_name}"
+            )
+        else:
+            self._log(f"Starting emulator (-cores {self.cpu_cores}): {' '.join(cmd)}")
+
         self._proc = subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,

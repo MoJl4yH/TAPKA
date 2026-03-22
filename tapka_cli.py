@@ -9,7 +9,7 @@
 
 Опции:
     APK_PATH            Путь до APK-файла (обязательный аргумент)
-    --all               Запустить все стадии (Stage1 + Stage2 + Stage3)
+    --all               Полный pipeline: Stage1 → Stage2 → Stage3 (MobSF dynamic v2 + Frida)
     --stage1            Статический анализ (jadx, YARA, rg, apktool, keytool)
     --stage2            Динамический анализ (эмулятор, ADB, pcap, filesystem diff)
     --stage3            Кросс-инструментальный анализ (MobSF, Quark, APKiD, APKLeaks)
@@ -214,7 +214,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("apk", metavar="APK_PATH", help="Путь до APK-файла")
 
     stages = parser.add_argument_group("Стадии анализа")
-    stages.add_argument("--all", action="store_true", help="Запустить все стадии: Stage1 → Stage2 → Stage3")
+    stages.add_argument("--all", action="store_true",
+                        help="Запустить полный pipeline: Stage1 → Stage2 → Stage3 (MobSF dynamic v2 + Frida включены)")
     stages.add_argument("--stage1", action="store_true", help="Статический анализ (jadx, YARA, rg, apktool)")
     stages.add_argument("--stage2", action="store_true", help="Динамический анализ (эмулятор + ADB)")
     stages.add_argument("--stage3", action="store_true", help="Кросс-инструментальный анализ (MobSF, Quark, APKiD, APKLeaks)")
@@ -271,6 +272,10 @@ def main() -> int:
 
     if args.all:
         args.stage1 = args.stage2 = args.stage3 = True
+        # Полный pipeline: MobSF dynamic v2 + Frida включены автоматически
+        args.mobsf_dynamic = True
+        args.mobsf_dynamic_v2 = True
+        args.mobsf_frida = True
 
     if not (args.stage1 or args.stage2 or args.stage3):
         parser.error("Укажите хотя бы одну стадию: --stage1 --stage2 --stage3 или --all")

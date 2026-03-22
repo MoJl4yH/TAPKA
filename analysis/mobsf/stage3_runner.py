@@ -74,6 +74,7 @@ class Stage3Config:
     avd_adb_serial: str | None = None     # ADB serial to pass directly to MobSF mobsfy
     avd_name: str = "tapka_api30"         # AVD name for emulator restart
     restart_emulator: bool = True         # Wipe + restart emulator before dynamic analysis for clean state
+    emulator_cpu_cores: int | None = None  # None = auto (os.cpu_count() // 2)
 
 
 class Stage3MobSFRunner:
@@ -653,16 +654,18 @@ class Stage3MobSFRunner:
         self._emit("Запуск оркестрированного динамического анализа MobSF (v2)...")
 
         # 0. Restart emulator with -wipe-data for a clean state before each analysis run
+        mgr = None
         if self.config.restart_emulator:
             from analysis.stage2.emulator import EmulatorManager  # noqa: PLC0415
             self._emit(f"Перезапуск эмулятора {self.config.avd_name} (wipe-data)...")
             mgr = EmulatorManager(
                 avd_name=self.config.avd_name,
                 on_log=log,
+                cpu_cores=self.config.emulator_cpu_cores,
             )
             mgr.start(headless=True)
-            if not mgr.wait_boot(timeout_sec=240):
-                raise RuntimeError("Emulator failed to boot within 240s")
+            if not mgr.wait_boot(timeout_sec=480):
+                raise RuntimeError("Emulator failed to boot within 480s")
             mgr.root()
             # frida 16+ marks Android as "jailed" when SELinux is Enforcing,
             # causing NotSupportedError on spawn/attach. Disable enforcement.
@@ -840,8 +843,27 @@ class Stage3MobSFRunner:
                     log(f"[WARN] Frida инструментирование пропущено: {exc}")
 
                 if frida_ok:
-                    # 7b. Monkey — случайные UI-события пока Frida hooks активны.
-                    # Запускаем сразу после attach, чтобы Frida перехватила API-вызовы,
+                    # 7b. Activity tester (второй прогон) — пока Frida hooks активны.
+                    # Первый прогон (до Frida) дал скриншоты + трафик через прокси.
+                    # Второй прогон позволяет Frida перехватить API-вызовы от запуска
+                    # каждой Activity (crypto, storage, network, reflection и т.д.).
+                    self._emit("Повторный тестер Activity (Frida-покрытие)...")
+                    for test_type, fname in (
+                        ("activity", "activity_tester_frida.json"),
+                        ("exported", "activity_tester_exported_frida.json"),
+                    ):
+                        try:
+                            self._call_and_save_json(
+                                lambda t=test_type: client.android_activity(scan_hash, t),
+                                dynamic_dir / fname,
+                                trace_dir,
+                                f"dynamic_{fname.replace('.json', '')}",
+                            )
+                        except MobSFClientError as exc:
+                            log(f"[WARN] Activity tester frida ({test_type}): {exc}")
+
+                    # 7c. Monkey — случайные UI-события пока Frida hooks активны.
+                    # Запускаем после activity tester, чтобы Frida перехватила API-вызовы,
                     # сгенерированные реальным UI-взаимодействием.
                     # Session daemon thread на MobSF сервере живёт 45s; monkey занимает
                     # monkey_events × monkey_throttle_ms ≈ 30s, что укладывается в окно.
@@ -860,6 +882,13 @@ class Stage3MobSFRunner:
                                     "adb", "-s", emulator_id, "shell", "monkey",
                                     "-p", package_name,
                                     "--throttle", str(self.config.monkey_throttle_ms),
+                                    "--pct-touch", "40",
+                                    "--pct-motion", "30",
+                                    "--pct-nav", "10",
+                                    "--pct-majornav", "10",
+                                    "--pct-syskeys", "5",
+                                    "--pct-appswitch", "0",
+                                    "--pct-anyevent", "5",
                                     "--ignore-crashes", "--ignore-timeouts",
                                     "--ignore-security-exceptions",
                                     str(self.config.monkey_events),
@@ -934,6 +963,11 @@ class Stage3MobSFRunner:
         finally:
             if adb_bridge_proc is not None:
                 adb_bridge_proc.terminate()
+            if mgr is not None:
+                try:
+                    mgr.stop()
+                except Exception:  # pylint: disable=broad-exception-caught
+                    pass
 
     def _check_mobsf_api_level(self, emulator_serial: str) -> None:
         """Raise MobSFClientError if the emulator API level exceeds MobSF's supported max (30)."""

@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import threading
 import time
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -31,6 +34,128 @@ from analysis.stage3_common import append_run_error, build_stage3_logger
 from analysis.stages import STAGE_DYNAMIC
 from analysis.storage import Storage
 from models import Run
+
+
+@dataclass
+class _ManifestData:
+    """Manifest components extracted from Stage 1 report / AndroidManifest.xml."""
+    exported_activities: list[str] = field(default_factory=list)
+    exported_receivers: list[str] = field(default_factory=list)
+    deeplinks: list[str] = field(default_factory=list)  # fully constructed URIs
+
+
+def _load_manifest_data(project_dir: Path) -> _ManifestData:
+    """Load exported components and deeplinks from Stage 1 artifacts.
+
+    First reads exported activities/receivers from stage1_report.json sections,
+    then parses AndroidManifest.xml (apktool output) for deeplink URIs.
+    """
+    result = _ManifestData()
+
+    # --- exported activities + receivers from stage1_report.json ---
+    try:
+        for report_path in sorted(project_dir.rglob("stage1_report.json"), reverse=True):
+            try:
+                data = json.loads(report_path.read_text(encoding="utf-8"))
+                for section in data.get("sections", []):
+                    if section.get("id") != "manifest":
+                        continue
+                    for item in section.get("data", {}).get("exported", []):
+                        tag, _, name = str(item).partition(":")
+                        if tag == "activity" and name:
+                            result.exported_activities.append(name)
+                        elif tag == "receiver" and name:
+                            result.exported_receivers.append(name)
+                if result.exported_activities or result.exported_receivers:
+                    break
+            except Exception:  # pylint: disable=broad-exception-caught
+                continue
+    except Exception:  # pylint: disable=broad-exception-caught
+        pass
+
+    # --- deeplinks from AndroidManifest.xml ---
+    try:
+        _NS = "http://schemas.android.com/apk/res/android"
+        for manifest_path in sorted(project_dir.rglob("AndroidManifest.xml"), reverse=True):
+            if "out_apktool" not in str(manifest_path):
+                continue
+            try:
+                tree = ET.parse(manifest_path)
+                root = tree.getroot()
+                for intent_filter in root.iter("intent-filter"):
+                    actions = [
+                        e.get(f"{{{_NS}}}name", "") for e in intent_filter.findall("action")
+                    ]
+                    categories = [
+                        e.get(f"{{{_NS}}}name", "") for e in intent_filter.findall("category")
+                    ]
+                    has_view = any(
+                        a == "android.intent.action.VIEW" or a.endswith(".VIEW")
+                        for a in actions
+                    )
+                    has_browsable = any(
+                        c == "android.intent.category.BROWSABLE" or c.endswith(".BROWSABLE")
+                        for c in categories
+                    )
+                    if not (has_view or has_browsable):
+                        continue
+                    for data_el in intent_filter.findall("data"):
+                        scheme = data_el.get(f"{{{_NS}}}scheme", "")
+                        host = data_el.get(f"{{{_NS}}}host", "")
+                        path = data_el.get(f"{{{_NS}}}path", "") or data_el.get(
+                            f"{{{_NS}}}pathPrefix", ""
+                        )
+                        if scheme:
+                            uri = f"{scheme}://{host}{path}" if host else f"{scheme}://"
+                            if uri not in result.deeplinks:
+                                result.deeplinks.append(uri)
+                break
+            except Exception:  # pylint: disable=broad-exception-caught
+                continue
+    except Exception:  # pylint: disable=broad-exception-caught
+        pass
+
+    return result
+
+
+def _parse_permissions(dumpsys_pkg_txt: str) -> dict[str, list[str]]:
+    """Parse requested/granted/denied permissions from 'dumpsys package <pkg>' output."""
+    requested: list[str] = []
+    granted: list[str] = []
+    denied: list[str] = []
+
+    in_requested = False
+    in_runtime = False
+    for line in dumpsys_pkg_txt.splitlines():
+        stripped = line.strip()
+        if "requested permissions:" in stripped.lower():
+            in_requested = True
+            in_runtime = False
+            continue
+        if "install permissions:" in stripped.lower() or "runtime permissions:" in stripped.lower():
+            in_requested = False
+            in_runtime = True
+            continue
+        if stripped and not stripped[0].isalpha() and in_requested:
+            # permission lines are indented
+            perm = stripped.split(":")[0].strip()
+            if perm.startswith("android.permission.") or "." in perm:
+                requested.append(perm)
+        if in_runtime and ":" in stripped:
+            perm, _, rest = stripped.partition(":")
+            perm = perm.strip()
+            if perm.startswith("android.permission.") or "." in perm:
+                if "granted=true" in rest:
+                    granted.append(perm)
+                elif "granted=false" in rest:
+                    denied.append(perm)
+        # Stop at next top-level section
+        if stripped.startswith("User ") or stripped.startswith("Package ["):
+            in_requested = False
+            in_runtime = False
+
+    return {"requested": sorted(set(requested)), "granted": sorted(set(granted)),
+            "denied": sorted(set(denied))}
 
 
 class _PidMonitor:
@@ -116,6 +241,7 @@ class Stage2DynamicRunner:
             avd_name=self.config.avd_name,
             adb_timeout_sec=self.config.adb_timeout_sec,
             on_log=log,
+            cpu_cores=self.config.emulator_cpu_cores,
         )
         snap = SystemSnapshot(adb_timeout_sec=self.config.adb_timeout_sec, on_log=log)
         installer = ApkInstaller(adb_timeout_sec=self.config.adb_timeout_sec, on_log=log)
@@ -266,6 +392,9 @@ class Stage2DynamicRunner:
             # Step 7: Launch app → resolve PID → start PID logcat + monitor
             # ----------------------------------------------------------------
             exerciser: UiExerciser | None = None
+            project_dir = run_dir.parent.parent.parent
+            manifest_data = _load_manifest_data(project_dir)
+
             if pkg_name:
                 log(f"Шаг 7: запуск приложения ({pkg_name})...")
                 run_command_capture(
@@ -292,12 +421,146 @@ class Stage2DynamicRunner:
                 )
                 exerciser.start()
                 exerciser_total = exerciser.events
+
+                # ------------------------------------------------------------
+                # Step 7a: Launch exported Activities via am start
+                # Runs after monkey starts so both generate traffic concurrently.
+                # First pass gives proxy-captured traffic + logcat coverage.
+                # ------------------------------------------------------------
+                if self.config.activity_fuzz and manifest_data.exported_activities:
+                    acts = manifest_data.exported_activities
+                    log(f"Запуск exported Activities ({len(acts)} шт.)...")
+                    act_dir = tools_dir / "adb_activities"
+                    act_dir.mkdir(parents=True, exist_ok=True)
+                    act_results: list[str] = []
+                    for act in acts:
+                        try:
+                            _, out, _ = run_command_capture(
+                                [adb, "shell", "am", "start", "-n", f"{pkg_name}/{act}"],
+                                timeout=self.config.adb_timeout_sec,
+                            )
+                            act_results.append(f"{act}: {(out or '').strip()[:120]}")
+                        except subprocess.TimeoutExpired:
+                            act_results.append(f"{act}: TIMEOUT")
+                            log(f"[WARN] am start {act}: timeout")
+                        time.sleep(2)
+                    (act_dir / "activity_launch_results.txt").write_text(
+                        "\n".join(act_results), encoding="utf-8"
+                    )
+                    log(f"Exported Activities: {len(act_results)} запущено.")
+
+                # ------------------------------------------------------------
+                # Step 7b: Deeplink fuzzing via am start -d URI
+                # ------------------------------------------------------------
+                if self.config.deeplink_fuzz and manifest_data.deeplinks:
+                    links = manifest_data.deeplinks
+                    log(f"Deeplink fuzzing: {len(links)} URI...")
+                    dl_dir = tools_dir / "adb_deeplinks"
+                    dl_dir.mkdir(parents=True, exist_ok=True)
+                    dl_results: list[str] = []
+                    for uri in links:
+                        try:
+                            _, out, _ = run_command_capture(
+                                [adb, "shell", "am", "start",
+                                 "-a", "android.intent.action.VIEW",
+                                 "-d", uri, pkg_name],
+                                timeout=self.config.adb_timeout_sec,
+                            )
+                            dl_results.append(f"{uri}: {(out or '').strip()[:120]}")
+                        except subprocess.TimeoutExpired:
+                            dl_results.append(f"{uri}: TIMEOUT")
+                            log(f"[WARN] deeplink {uri}: timeout")
+                        time.sleep(2)
+                    (dl_dir / "deeplink_fuzz.txt").write_text(
+                        "\n".join(dl_results), encoding="utf-8"
+                    )
+                    log(f"Deeplink fuzzing: {len(dl_results)} URI отправлено.")
+
+                # ------------------------------------------------------------
+                # Step 7c: Intent fuzzing — am broadcast to exported receivers
+                # + common system broadcast actions
+                # ------------------------------------------------------------
+                if self.config.intent_fuzz:
+                    int_dir = tools_dir / "adb_intents"
+                    int_dir.mkdir(parents=True, exist_ok=True)
+                    int_results: list[str] = []
+
+                    # Exported receivers by component name
+                    for recv in manifest_data.exported_receivers:
+                        try:
+                            _, out, _ = run_command_capture(
+                                [adb, "shell", "am", "broadcast",
+                                 "-n", f"{pkg_name}/{recv}"],
+                                timeout=self.config.adb_timeout_sec,
+                            )
+                            int_results.append(f"component {recv}: {(out or '').strip()[:120]}")
+                        except subprocess.TimeoutExpired:
+                            int_results.append(f"component {recv}: TIMEOUT")
+                            log(f"[WARN] am broadcast {recv}: timeout")
+                        time.sleep(1)
+
+                    # Common system broadcast actions directed at the package.
+                    # Protected broadcasts (BOOT_COMPLETED, CONNECTIVITY_CHANGE) are
+                    # system-only senders — am broadcast hangs the full timeout before
+                    # Android rejects them. Omitted intentionally.
+                    _COMMON_ACTIONS = [
+                        "android.intent.action.MY_PACKAGE_REPLACED",
+                        "android.intent.action.USER_PRESENT",
+                    ]
+                    for action in _COMMON_ACTIONS:
+                        try:
+                            _, out, _ = run_command_capture(
+                                [adb, "shell", "am", "broadcast",
+                                 "-a", action, "-p", pkg_name],
+                                timeout=self.config.adb_timeout_sec,
+                            )
+                            int_results.append(f"action {action}: {(out or '').strip()[:120]}")
+                        except subprocess.TimeoutExpired:
+                            int_results.append(f"action {action}: TIMEOUT")
+                            log(f"[WARN] am broadcast {action}: timeout")
+                        time.sleep(1)
+
+                    if int_results:
+                        (int_dir / "broadcast_results.txt").write_text(
+                            "\n".join(int_results), encoding="utf-8"
+                        )
+                        log(f"Broadcast fuzzing: {len(int_results)} запросов отправлено.")
+
             else:
                 log("Шаг 7: имя пакета не определено, запуск Monkey пропущен.")
 
             log(f"Выполняется захват в течение {self.config.runtime_duration_sec} с...")
             capture_start_ts = time.monotonic()  # window starts when exerciser is running
-            time.sleep(self.config.runtime_duration_sec)
+
+            # Monitoring loop — replaces bare time.sleep(runtime_duration_sec).
+            # Detects early monkey exit and restarts the app + a new exerciser
+            # for the remaining window so capture time is not wasted.
+            _POLL_INTERVAL = 5
+            deadline = time.monotonic() + self.config.runtime_duration_sec
+            while time.monotonic() < deadline:
+                time.sleep(min(_POLL_INTERVAL, max(0.0, deadline - time.monotonic())))
+                if (
+                    self.config.monkey_restart
+                    and pkg_name
+                    and exerciser is not None
+                    and exerciser.is_done
+                ):
+                    remaining = deadline - time.monotonic()
+                    if remaining > 30:
+                        log(f"UiExerciser: завершился досрочно, перезапуск (осталось {remaining:.0f}s)...")
+                        run_command_capture(
+                            [adb, "shell", "monkey", "-p", pkg_name,
+                             "-c", "android.intent.category.LAUNCHER", "1"],
+                            timeout=self.config.adb_timeout_sec,
+                        )
+                        time.sleep(3)
+                        exerciser = UiExerciser(
+                            package=pkg_name,
+                            duration_sec=int(remaining),
+                            on_log=log,
+                        )
+                        exerciser.start()
+                        exerciser_total += exerciser.events
 
             # ----------------------------------------------------------------
             # Step 8: Stop exerciser + monitors + logcat + traffic
@@ -377,9 +640,53 @@ class Stage2DynamicRunner:
             # ----------------------------------------------------------------
             pkg_files: list[str] = []
             appops_path = ""
+            dumpsys_paths: dict[str, str] = {}
+            permissions_diff: dict[str, list[str]] = {}
             if pkg_name:
                 pkg_files = self._capture_pkg_files(pkg_name, adb, tools_dir, log)
                 appops_path = self._capture_appops(pkg_name, adb, tools_dir, log)
+
+                # --------------------------------------------------------
+                # Step 9.6: Dumpsys collection (package / activity / battery)
+                # --------------------------------------------------------
+                if self.config.collect_dumpsys:
+                    log("Сбор dumpsys (package/activity/battery)...")
+                    dumpsys_dir = tools_dir / "adb_dumpsys"
+                    dumpsys_dir.mkdir(parents=True, exist_ok=True)
+                    dumpsys_targets = [
+                        (["dumpsys", "package", pkg_name], "dumpsys_package.txt"),
+                        (["dumpsys", "activity", "activities"], "dumpsys_activities.txt"),
+                        (["dumpsys", "battery"], "dumpsys_battery.txt"),
+                    ]
+                    for subcmd, fname in dumpsys_targets:
+                        _, out, _ = run_command_capture(
+                            [adb, "shell"] + subcmd,
+                            timeout=self.config.adb_timeout_sec,
+                        )
+                        fpath = dumpsys_dir / fname
+                        fpath.write_text(out or "", encoding="utf-8", errors="replace")
+                        dumpsys_paths[fname] = str(fpath)
+                    log(f"Dumpsys сохранён: {', '.join(dumpsys_paths.keys())}")
+
+                # --------------------------------------------------------
+                # Step 9.7: Permissions comparison (requested vs granted)
+                # --------------------------------------------------------
+                if self.config.collect_permissions:
+                    pkg_dumpsys = dumpsys_paths.get("dumpsys_package.txt", "")
+                    if pkg_dumpsys and Path(pkg_dumpsys).exists():
+                        txt = Path(pkg_dumpsys).read_text(encoding="utf-8", errors="replace")
+                        permissions_diff = _parse_permissions(txt)
+                        perms_dir = tools_dir / "adb_permissions"
+                        perms_dir.mkdir(parents=True, exist_ok=True)
+                        perm_path = perms_dir / "permissions_diff.json"
+                        perm_path.write_text(
+                            json.dumps(permissions_diff, indent=2, ensure_ascii=False),
+                            encoding="utf-8",
+                        )
+                        n_req = len(permissions_diff.get("requested", []))
+                        n_gr = len(permissions_diff.get("granted", []))
+                        n_dn = len(permissions_diff.get("denied", []))
+                        log(f"Permissions: {n_req} requested, {n_gr} granted, {n_dn} denied.")
 
             stage2_data["runtime_diff"] = {
                 "logcat_path": logcat_out,
@@ -389,6 +696,8 @@ class Stage2DynamicRunner:
                 "target_pkg_files": pkg_files[:100],
                 "target_pkg_files_count": len(pkg_files),
                 "appops_path": appops_path,
+                "dumpsys_paths": dumpsys_paths,
+                "permissions_diff": permissions_diff,
             }
 
             # ----------------------------------------------------------------

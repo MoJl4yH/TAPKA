@@ -8,12 +8,19 @@ class Stage2Config:
     avd_name: str = "tapka_api30"
     api_level: int = 30
     runtime_duration_sec: int = 180
-    emulator_boot_timeout_sec: int = 180
+    emulator_boot_timeout_sec: int = 480
+    emulator_cpu_cores: int | None = None  # None = auto (os.cpu_count() // 2)
     adb_timeout_sec: int = 30
     zeek_enabled: bool = True
     enable_https_interception: bool = False  # Enable mitmproxy HTTPS interception
     mitm_port: int = 8888                    # mitmdump listen port
     mitm_dump_path: str | None = None        # Path for .mitm flow dump file (optional)
+    activity_fuzz: bool = True               # Launch exported activities via am start
+    deeplink_fuzz: bool = True               # Fuzz deeplinks via am start -d URI
+    intent_fuzz: bool = True                 # Fuzz exported receivers via am broadcast
+    monkey_restart: bool = True              # Restart monkey if it dies before runtime window ends
+    collect_dumpsys: bool = True             # Collect dumpsys package/activity/battery after runtime
+    collect_permissions: bool = True         # Compare requested vs granted permissions
 
 
 @dataclass

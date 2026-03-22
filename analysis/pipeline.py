@@ -63,9 +63,31 @@ def run_full_pipeline(
     result = PipelineResult(project_id=project_id)
 
     # ── Stage 1 ──────────────────────────────────────────────────────────────
+    # Stage1 emits dicts {"message":..,"completed":..,"total":..}, but the
+    # pipeline's `log` callback expects plain strings. Adapt here so GUI
+    # log views and CLI stdout always receive printable strings.
+    def _stage1_log(payload: object) -> None:
+        if isinstance(payload, dict):
+            parts = []
+            msg = payload.get("message", "")
+            if msg:
+                parts.append(msg)
+            completed = int(payload.get("completed", 0))
+            total = int(payload.get("total", 0))
+            if total:
+                parts.append(f"{completed}/{total}")
+            elapsed = payload.get("elapsed_sec")
+            if elapsed is not None:
+                m, s = divmod(int(elapsed), 60)
+                parts.append(f"{m}:{s:02d}" if m else f"{s}s")
+            if parts:
+                log("  " + " · ".join(parts))
+        else:
+            log(str(payload))
+
     log("=== Pipeline: Stage 1 — Static Analysis ===")
     try:
-        runner1 = Stage1StaticRunner(storage, on_progress=log)
+        runner1 = Stage1StaticRunner(storage, on_progress=_stage1_log)
         runner1.run(project_id)
         result.stage1_ok = True
         log("Stage 1 OK")
@@ -88,6 +110,13 @@ def run_full_pipeline(
         except Exception as exc:  # pylint: disable=broad-exception-caught
             result.errors.append(f"stage2: {exc}")
             log(f"Stage 2 FAILED: {exc}")
+
+    # ── Пауза между Stage 2 и Stage 3 ───────────────────────────────────────
+    # Даём ОС 15 секунд освободить память после остановки QEMU-эмулятора
+    # перед тем как Stage 3 MobSF запустит новый эмулятор.
+    if cfg.run_stage2 and cfg.run_stage3:
+        log("Pipeline: ожидание освобождения памяти после Stage 2 (15s)...")
+        time.sleep(15)
 
     # ── Stage 3 ──────────────────────────────────────────────────────────────
     if cfg.run_stage3:

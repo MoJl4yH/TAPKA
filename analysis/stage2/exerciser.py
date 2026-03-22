@@ -95,6 +95,11 @@ class UiExerciser:
             elif line.startswith("** Monkey aborted"):
                 self._log(f"UiExerciser: aborted by Monkey — {line}")
 
+    @property
+    def is_done(self) -> bool:
+        """True if monkey process has exited or was never started."""
+        return self._proc is None or self._proc.poll() is not None
+
     def stop(self) -> None:
         if self._proc is not None:
             try:

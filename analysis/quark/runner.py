@@ -15,11 +15,12 @@ from analysis.runtime.exec import run_command_capture
 from analysis.runtime.fs import clear_tool_dir, write_tool_bundle
 from analysis.settings import SETTINGS_DIR
 from analysis.models.quark import QuarkReport, QuarkRuleResult, QuarkSummary
+from analysis.stage3_common import find_tool
 
 
 DEFAULT_RULES_DIR = SETTINGS_DIR / "quark-rules"
 DEFAULT_SOURCE_RULES_DIR = Path.home() / ".quark-engine" / "quark-rules"
-QUARK_COMMAND = "quark"
+QUARK_COMMAND = find_tool("quark")
 
 
 def _quark_is_matched(crime: dict) -> bool:

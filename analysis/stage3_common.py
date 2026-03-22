@@ -1,11 +1,30 @@
 from __future__ import annotations
 
 import json
+import shutil
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
 from analysis.runtime.clock import now_utc_iso
+
+
+def find_tool(name: str) -> str:
+    """Resolve a CLI tool name to its full path.
+
+    Search order:
+    1. System PATH (shutil.which)
+    2. Directory of the current Python interpreter (venv bin)
+    3. Return bare name as fallback (subprocess will raise its own error)
+    """
+    found = shutil.which(name)
+    if found:
+        return found
+    venv_candidate = Path(sys.executable).parent / name
+    if venv_candidate.is_file():
+        return str(venv_candidate)
+    return name
 from analysis.runtime.context import RunContext
 from analysis.runtime.fs import ensure_run_dir, ensure_run_json, write_json, write_run_finished
 from analysis.stages import STAGE_CROSS_TOOL

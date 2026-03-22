@@ -11,9 +11,10 @@ from analysis.runtime.clock import now_utc_iso
 from analysis.runtime.context import RunContext
 from analysis.runtime.exec import run_command_capture
 from analysis.runtime.fs import clear_tool_dir, tool_dir, write_text, write_tool_bundle
+from analysis.stage3_common import find_tool
 
 
-APKID_COMMAND = "apkid"
+APKID_COMMAND = find_tool("apkid")
 
 
 @dataclass

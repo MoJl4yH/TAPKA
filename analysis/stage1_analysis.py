@@ -911,7 +911,8 @@ class Stage1StaticRunner:
         cert_names = self._list_cert_entries(apk_path)
         so_count_estimate = self._count_zip_entries(apk_path, ".so")
         rg_step_count = self._rg_step_count(paths.apktool_dir.exists(), paths.jadx_dir.exists())
-        total_steps = 12 + len(cert_names) + rg_step_count + so_count_estimate
+        # +1 for YARA, +1 for semgrep, +1 for checksec (if .so files present)
+        total_steps = 12 + len(cert_names) + rg_step_count + so_count_estimate + 1 + (1 if so_count_estimate > 0 else 0)
         progress = ProgressTracker(
             runner=self,
             log=log,
@@ -1135,7 +1136,10 @@ class Stage1StaticRunner:
 
         # semgrep — запускаем на JADX-выводе, если он есть
         _semgrep_t0 = time.monotonic()
-        semgrep_findings = self._run_semgrep_findings(paths)
+        semgrep_findings = state.progress.run_step(
+            "Semgrep-сканирование",
+            lambda: self._run_semgrep_findings(paths),
+        )
         findings.extend(semgrep_findings)
         if paths.jadx_dir.exists():
             _semgrep_dur = round(time.monotonic() - _semgrep_t0, 2)
@@ -1153,7 +1157,13 @@ class Stage1StaticRunner:
 
         # checksec — анализ .so библиотек
         _checksec_t0 = time.monotonic()
-        checksec_findings = self._run_checksec_findings(paths, so_files)
+        if so_files:
+            checksec_findings = state.progress.run_step(
+                "checksec (.so библиотеки)",
+                lambda: self._run_checksec_findings(paths, so_files),
+            )
+        else:
+            checksec_findings = self._run_checksec_findings(paths, so_files)
         findings.extend(checksec_findings)
         if so_files:
             _checksec_dur = round(time.monotonic() - _checksec_t0, 2)
