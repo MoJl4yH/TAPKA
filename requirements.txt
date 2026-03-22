@@ -5,6 +5,7 @@ quark-engine==26.1.1
 apkid==3.0.0
 apkleaks==2.6.3
 keyring>=25.0.0
+defusedxml>=0.7.0
 semgrep>=1.50.0
 rich>=14.0.0
 mitmproxy>=10.0.0

@@ -18,6 +18,7 @@ CA installation strategy (tried in order):
 """
 from __future__ import annotations
 
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -82,6 +83,9 @@ def install_mitm_ca_to_emulator(serial: str, on_progress=None) -> None:
     cert_hash = result.stdout.strip()
     if not cert_hash:
         raise RuntimeError("openssl returned empty subject_hash_old")
+    # BUG-SEC-08: validate cert_hash to prevent shell injection via f-string interpolation
+    if not re.match(r'^[a-f0-9]{1,16}$', cert_hash):
+        raise RuntimeError(f"Invalid cert_hash from openssl: {cert_hash!r}")
 
     log(f"mitmproxy CA hash: {cert_hash}")
     adb = _adb_cmd(serial)
@@ -94,16 +98,20 @@ def install_mitm_ca_to_emulator(serial: str, on_progress=None) -> None:
         raise RuntimeError(
             f"adb push to /data/local/tmp failed: {push_tmp.stderr.strip() or push_tmp.stdout.strip()}"
         )
-    _run(adb, ["shell", f"chmod 644 {tmp_cert}"])
+    _run(adb, ["shell", "chmod", "644", tmp_cert])
 
     # ── 3. Strategy 1: bind-mount system cacerts dir (API ≤ 33) ───────────
     sys_cacerts_ok = False
     sys_cacerts_check = _run(adb, ["shell", "test", "-d", SYSTEM_CACERTS])
     if sys_cacerts_check.returncode == 0:
         log(f"Trying bind-mount strategy over {SYSTEM_CACERTS}...")
-        # Build temp dir with all existing certs + ours
-        _run(adb, ["shell", f"mkdir -p {tmp_cacerts_dir} && cp {SYSTEM_CACERTS}/* {tmp_cacerts_dir}/"], timeout=20)
-        _run(adb, ["shell", f"cp {tmp_cert} {tmp_cacerts_dir}/{cert_hash}.0 && chmod 644 {tmp_cacerts_dir}/{cert_hash}.0 && chmod 755 {tmp_cacerts_dir}"])
+        # Build temp dir with all existing certs + ours (two separate adb shell calls
+        # to avoid compound shell string with injected cert_hash)
+        _run(adb, ["shell", "mkdir", "-p", tmp_cacerts_dir], timeout=20)
+        _run(adb, ["shell", "sh", "-c", f"cp {SYSTEM_CACERTS}/* {tmp_cacerts_dir}/"], timeout=20)
+        _run(adb, ["shell", "cp", tmp_cert, f"{tmp_cacerts_dir}/{cert_hash}.0"])
+        _run(adb, ["shell", "chmod", "644", f"{tmp_cacerts_dir}/{cert_hash}.0"])
+        _run(adb, ["shell", "chmod", "755", tmp_cacerts_dir])
         # Bind-mount
         mount_r = _run(adb, ["shell", "mount", "--bind", tmp_cacerts_dir, SYSTEM_CACERTS])
         if mount_r.returncode == 0:
@@ -118,8 +126,11 @@ def install_mitm_ca_to_emulator(serial: str, on_progress=None) -> None:
     if apex_check.returncode == 0:
         log(f"Trying bind-mount strategy over {APEX_CACERTS}...")
         apex_tmp_dir = "/data/local/tmp/apex_cacerts"
-        _run(adb, ["shell", f"mkdir -p {apex_tmp_dir} && cp {APEX_CACERTS}/* {apex_tmp_dir}/"], timeout=20)
-        _run(adb, ["shell", f"cp {tmp_cert} {apex_tmp_dir}/{cert_hash}.0 && chmod 644 {apex_tmp_dir}/{cert_hash}.0 && chmod 755 {apex_tmp_dir}"])
+        _run(adb, ["shell", "mkdir", "-p", apex_tmp_dir], timeout=20)
+        _run(adb, ["shell", "sh", "-c", f"cp {APEX_CACERTS}/* {apex_tmp_dir}/"], timeout=20)
+        _run(adb, ["shell", "cp", tmp_cert, f"{apex_tmp_dir}/{cert_hash}.0"])
+        _run(adb, ["shell", "chmod", "644", f"{apex_tmp_dir}/{cert_hash}.0"])
+        _run(adb, ["shell", "chmod", "755", apex_tmp_dir])
         mount_r = _run(adb, ["shell", "mount", "--bind", apex_tmp_dir, APEX_CACERTS])
         if mount_r.returncode == 0:
             log(f"mitmproxy CA bind-mounted to APEX store: {APEX_CACERTS}/{cert_hash}.0")

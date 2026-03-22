@@ -66,6 +66,14 @@ class Storage:
         self._ensure_dir(version_dir / "apk")
 
         target = version_dir / "apk" / "original.apk"
+        # BUG-REL-05: check available disk space before copying
+        needed = apk_path.stat().st_size
+        free = shutil.disk_usage(target.parent).free
+        if free < needed + 100_000_000:
+            raise OSError(
+                f"Недостаточно места на диске: нужно {(needed + 100_000_000) / 1e9:.1f} ГБ, "
+                f"свободно {free / 1e9:.1f} ГБ"
+            )
         shutil.copy2(apk_path, target)
 
         rel_path = str(target.relative_to(project_dir))
@@ -132,6 +140,14 @@ class Storage:
         version_dir = versions_dir / version_id
         self._ensure_dir(version_dir / "apk")
         target = version_dir / "apk" / "original.apk"
+        # BUG-REL-05: check available disk space before copying
+        needed = apk_path.stat().st_size
+        free = shutil.disk_usage(target.parent).free
+        if free < needed + 100_000_000:
+            raise OSError(
+                f"Недостаточно места на диске: нужно {(needed + 100_000_000) / 1e9:.1f} ГБ, "
+                f"свободно {free / 1e9:.1f} ГБ"
+            )
         shutil.copy2(apk_path, target)
         rel_path = str(target.relative_to(project_dir))
         meta = self._build_apk_meta(apk_path.name, target, sha256, rel_path=rel_path)

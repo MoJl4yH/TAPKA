@@ -181,13 +181,15 @@ class ZeekAnalyzer:
         if conn_log.exists():
             ips: set[str] = set()
             try:
-                for line in conn_log.read_text(encoding="utf-8", errors="replace").splitlines():
-                    if line.startswith("#"):
-                        continue
-                    parts = line.split("\t")
-                    if len(parts) >= 5:
-                        ips.add(parts[2])
-                        ips.add(parts[4])
+                with conn_log.open(encoding="utf-8", errors="replace") as _fh:
+                    for line in _fh:
+                        line = line.rstrip("\n")
+                        if line.startswith("#"):
+                            continue
+                        parts = line.split("\t")
+                        if len(parts) >= 5:
+                            ips.add(parts[2])
+                            ips.add(parts[4])
             except Exception:  # pylint: disable=broad-exception-caught
                 pass
             capture.unique_ips = len(ips)
@@ -198,15 +200,17 @@ class ZeekAnalyzer:
             domains: set[str] = set()
             hosts: list[str] = []
             try:
-                for line in dns_log.read_text(encoding="utf-8", errors="replace").splitlines():
-                    if line.startswith("#"):
-                        continue
-                    parts = line.split("\t")
-                    if len(parts) > 9:
-                        query = parts[9]
-                        if query and query != "-":
-                            domains.add(query)
-                            hosts.append(query)
+                with dns_log.open(encoding="utf-8", errors="replace") as _fh:
+                    for line in _fh:
+                        line = line.rstrip("\n")
+                        if line.startswith("#"):
+                            continue
+                        parts = line.split("\t")
+                        if len(parts) > 9:
+                            query = parts[9]
+                            if query and query != "-":
+                                domains.add(query)
+                                hosts.append(query)
             except Exception:  # pylint: disable=broad-exception-caught
                 pass
             capture.unique_domains = len(domains)

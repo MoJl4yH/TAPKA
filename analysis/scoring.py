@@ -15,6 +15,9 @@ STAGE_RAW_CAP: dict[str, float] = {"stage1": 50.0, "stage2": 30.0, "stage3": 40.
 # Множители для уровней достоверности (совпадают с SeverityEngine)
 CONF_MULT: dict[str, float] = {"C3": 1.0, "C2": 0.75, "C1": 0.5}
 
+# Fallback severity → impact when category not in impact_table (BUG-REP-06)
+_SEVERITY_TO_IMPACT: dict[str, int] = {"high": 4, "medium": 2, "low": 1, "info": 0}
+
 
 @dataclass
 class StageScore:
@@ -40,7 +43,11 @@ def _score_stage(stage: str, findings: list[FindingV2]) -> StageScore:
     raw_sum = 0.0
 
     for f in findings:
-        base = SeverityEngine.impact_table.get(f.category, 1)
+        # BUG-ARCH-06: unknown category → 0 (not 1) to avoid score inflation
+        base = SeverityEngine.impact_table.get(f.category, 0)
+        # BUG-REP-06: fall back to pre-computed severity when category is unknown
+        if base == 0:
+            base = _SEVERITY_TO_IMPACT.get(f.severity or "info", 0)
         tag_boost = sum(SeverityEngine.tag_boosts.get(t, 0.0) for t in (f.tags or []))
         tag_boost = min(tag_boost, SeverityEngine.max_tag_boost)
         conf = f.confidence if f.confidence in CONF_MULT else "C1"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import subprocess
 from dataclasses import dataclass, field
@@ -73,36 +74,20 @@ class Stage3BatchRunner:
         # ── MobSF (container setup + analysis) ──────────────────────────────
         if not self.config.skip_mobsf:
             self.on_progress("=== MobSF: запуск контейнера ===")
+            mobsf_timeout = self.config.tool_timeout_sec or 900  # 15 min default
             try:
-                settings = load_settings()
-                mobsf_url = normalize_base_url(
-                    settings.get("mobsf", {}).get("url", DEFAULT_MOBSF_URL)
-                )
-                api_key = get_mobsf_api_key()
-                emulator_id = (
-                    self.config.mobsf_config.avd_adb_serial
-                    or _detect_emulator()
-                    or "emulator-5554"  # default tapka AVD serial
-                )
-                setup = ensure_mobsf_ready(
-                    mobsf_url, api_key=api_key,
-                    emulator_id=emulator_id,
-                    log=self.on_progress,
-                )
-                # Persist generated key if it's new
-                if setup.api_key and setup.api_key != api_key:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _executor:
+                    _future = _executor.submit(self._run_mobsf, project_id, ctx)
                     try:
-                        set_mobsf_api_key(setup.api_key)
-                    except Exception:  # pylint: disable=broad-exception-caught
-                        pass
-                self.on_progress("=== MobSF: запуск анализа ===")
-                runner = Stage3MobSFRunner(
-                    self.storage,
-                    config=self.config.mobsf_config,
-                    on_progress=self.on_progress,
-                )
-                run = runner.run(project_id, ctx=ctx)
-                results["mobsf"] = run
+                        run = _future.result(timeout=mobsf_timeout)
+                        results["mobsf"] = run
+                    except concurrent.futures.TimeoutError:
+                        self.on_progress(
+                            f"[WARN] MobSF timeout after {mobsf_timeout}s"
+                        )
+                        results["mobsf"] = TimeoutError(
+                            f"MobSF timeout ({mobsf_timeout}s)"
+                        )
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 self.on_progress(f"MobSF завершился ошибкой: {exc}")
                 results["mobsf"] = exc
@@ -176,3 +161,35 @@ class Stage3BatchRunner:
                 pass
 
         return results
+
+    def _run_mobsf(self, project_id: str, ctx: object) -> Run:
+        """Run MobSF setup + analysis (executed in a thread for timeout support)."""
+        from analysis.runtime.context import RunContext  # noqa: PLC0415
+        settings = load_settings()
+        mobsf_url = normalize_base_url(
+            settings.get("mobsf", {}).get("url", DEFAULT_MOBSF_URL)
+        )
+        api_key = get_mobsf_api_key()
+        emulator_id = (
+            self.config.mobsf_config.avd_adb_serial
+            or _detect_emulator()
+            or "emulator-5554"  # default tapka AVD serial
+        )
+        setup = ensure_mobsf_ready(
+            mobsf_url, api_key=api_key,
+            emulator_id=emulator_id,
+            log=self.on_progress,
+        )
+        # Persist generated key if it's new
+        if setup.api_key and setup.api_key != api_key:
+            try:
+                set_mobsf_api_key(setup.api_key)
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+        self.on_progress("=== MobSF: запуск анализа ===")
+        runner = Stage3MobSFRunner(
+            self.storage,
+            config=self.config.mobsf_config,
+            on_progress=self.on_progress,
+        )
+        return runner.run(project_id, ctx=ctx)

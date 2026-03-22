@@ -42,10 +42,20 @@ def get_mobsf_api_key() -> str | None:
 
 
 def set_mobsf_api_key(key: str) -> None:
-    """Store MobSF API key in a dedicated secret file with restricted permissions."""
+    """Store MobSF API key in a dedicated secret file with restricted permissions.
+
+    Uses os.open() with mode=0o600 so the file is created with tight permissions
+    *before* any data is written, eliminating the TOCTOU window that existed when
+    write_text() was followed by a separate chmod() call.
+    """
     SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
-    _MOBSF_API_KEY_FILE.write_text(key.strip(), encoding="utf-8")
+    fd = os.open(str(_MOBSF_API_KEY_FILE), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        os.chmod(_MOBSF_API_KEY_FILE, 0o600)
-    except OSError:
-        pass
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(key.strip())
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise

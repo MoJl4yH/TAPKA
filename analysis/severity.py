@@ -109,6 +109,18 @@ class SeverityEngine:
         "checksec_no_canary": 3,
         "checksec_no_pie": 2,
         "checksec_no_relro": 2,
+        # --- Stage3: MobSF ---
+        "mobsf_appsec": 3,
+        # --- Stage3: Quark ---
+        "quark_rule_match": 3,
+        # --- Stage3: APKiD (informational — packer/obfuscator detection) ---
+        "apkid_match": 1,
+        # --- Stage3: APKLeaks ---
+        "apkleaks_secret": 5,
+        "apkleaks_password": 4,
+        "apkleaks_token": 4,
+        "apkleaks_api_key": 4,
+        "apkleaks_generic": 1,
     }
 
     thresholds = {"high": 3.5, "medium": 2.0, "low": 1.0}

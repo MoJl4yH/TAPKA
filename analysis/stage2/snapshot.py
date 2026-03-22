@@ -57,6 +57,11 @@ class SystemSnapshot:
             [adb, "pull", remote_tar, str(local_tar)],
             timeout=self.adb_timeout_sec * 3,
         )
+        # BUG-REL-02: clean up remote tar after pulling to free device storage
+        run_command_capture(
+            [adb, "shell", "rm", "-f", remote_tar],
+            timeout=30,
+        )
         if local_tar.exists():
             snap.fs_tar_path = str(local_tar)
 

@@ -2683,7 +2683,12 @@ class ReportManager:
         from models.report_v2 import SecurityScoreV2
 
         findings_by_stage = self.load_all_findings(project_id)
-        security = compute_score(findings_by_stage)
+        # BUG-REP-03: guard against scoring errors so report generation always succeeds
+        try:
+            security = compute_score(findings_by_stage)
+        except Exception:  # pylint: disable=broad-exception-caught
+            from analysis.scoring import SecurityScore
+            security = SecurityScore(total=0.0, risk_label="unknown", stages={}, breakdown={})
 
         score_v2 = SecurityScoreV2(
             total=security.total,

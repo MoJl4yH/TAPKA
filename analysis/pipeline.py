@@ -55,8 +55,13 @@ def run_full_pipeline(
 
     # Создаём или используем существующий проект
     if project_id:
-        # Используем переданный project_id, не создаём новый проект
-        pass
+        # BUG-CLI-04: validate that the project actually exists before running stages
+        try:
+            storage.load_project(project_id)
+        except (FileNotFoundError, ValueError, OSError) as exc:
+            result = PipelineResult(project_id=project_id)
+            result.errors.append(f"Invalid project_id '{project_id}': {exc}")
+            return result
     else:
         project = storage.create_project(str(apk_path))
         project_id = project.project_id
@@ -78,8 +83,12 @@ def run_full_pipeline(
                 parts.append(f"{completed}/{total}")
             elapsed = payload.get("elapsed_sec")
             if elapsed is not None:
-                m, s = divmod(int(elapsed), 60)
-                parts.append(f"{m}:{s:02d}" if m else f"{s}s")
+                # BUG-CLI-03: guard against non-numeric elapsed_sec
+                try:
+                    m, s = divmod(int(elapsed), 60)
+                    parts.append(f"{m}:{s:02d}" if m else f"{s}s")
+                except (ValueError, TypeError):
+                    pass
             if parts:
                 log("  " + " · ".join(parts))
         else:
@@ -126,9 +135,10 @@ def run_full_pipeline(
 
             s3_cfg = cfg.stage3_config or Stage3BatchConfig()
             runner3 = Stage3BatchRunner(storage, config=s3_cfg, on_progress=log)
-            runner3.run(project_id)
-            result.stage3_ok = True
-            log("Stage 3 OK")
+            # BUG-PIPE-02: check actual results dict instead of assuming success
+            results3 = runner3.run(project_id)
+            result.stage3_ok = all(not isinstance(r, Exception) for r in results3.values())
+            log(f"Stage 3 {'OK' if result.stage3_ok else 'завершён с ошибками'}")
         except Exception as exc:  # pylint: disable=broad-exception-caught
             result.errors.append(f"stage3: {exc}")
             log(f"Stage 3 FAILED: {exc}")
@@ -150,7 +160,13 @@ def run_full_pipeline(
 
         rm2 = RM2(storage)
         combined = rm2.generate_combined_report(project_id, RT2.EXTENDED)
-        overall_path = storage.get_active_version_dir(project_id) / "overall_report.json"
+        # BUG-ARCH-09: guard against get_active_version_dir failure
+        try:
+            version_dir = storage.get_active_version_dir(project_id)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            log(f"[WARN] Не удалось получить version_dir: {exc}")
+            version_dir = storage.get_project_dir(project_id)
+        overall_path = version_dir / "overall_report.json"
         overall_path.write_text(combined.model_dump_json(indent=2, by_alias=True), encoding="utf-8")
         log(f"Combined report: {overall_path}")
     except Exception as exc:  # pylint: disable=broad-exception-caught

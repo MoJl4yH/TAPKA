@@ -6,6 +6,10 @@ import subprocess
 import threading
 import time
 import xml.etree.ElementTree as ET
+try:
+    from defusedxml.ElementTree import parse as _safe_xml_parse
+except ImportError:
+    _safe_xml_parse = ET.parse  # type: ignore[assignment]
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -44,6 +48,14 @@ class _ManifestData:
     deeplinks: list[str] = field(default_factory=list)  # fully constructed URIs
 
 
+def _find_project_dir(run_dir: Path) -> Path | None:
+    """Walk up the directory tree until project.json is found."""
+    for parent in run_dir.parents:
+        if (parent / "project.json").exists():
+            return parent
+    return None
+
+
 def _load_manifest_data(project_dir: Path) -> _ManifestData:
     """Load exported components and deeplinks from Stage 1 artifacts.
 
@@ -80,7 +92,7 @@ def _load_manifest_data(project_dir: Path) -> _ManifestData:
             if "out_apktool" not in str(manifest_path):
                 continue
             try:
-                tree = ET.parse(manifest_path)
+                tree = _safe_xml_parse(manifest_path)
                 root = tree.getroot()
                 for intent_filter in root.iter("intent-filter"):
                     actions = [
@@ -97,7 +109,7 @@ def _load_manifest_data(project_dir: Path) -> _ManifestData:
                         c == "android.intent.category.BROWSABLE" or c.endswith(".BROWSABLE")
                         for c in categories
                     )
-                    if not (has_view or has_browsable):
+                    if not (has_view and has_browsable):
                         continue
                     for data_el in intent_filter.findall("data"):
                         scheme = data_el.get(f"{{{_NS}}}scheme", "")
@@ -136,7 +148,7 @@ def _parse_permissions(dumpsys_pkg_txt: str) -> dict[str, list[str]]:
             in_requested = False
             in_runtime = True
             continue
-        if stripped and not stripped[0].isalpha() and in_requested:
+        if stripped and stripped[0].isalpha() and in_requested:
             # permission lines are indented
             perm = stripped.split(":")[0].strip()
             if perm.startswith("android.permission.") or "." in perm:
@@ -186,16 +198,19 @@ class _PidMonitor:
 
     def _run(self) -> None:
         while not self._stop_event.wait(5):
-            _, out, _ = run_command_capture(
-                [self.adb_bin, "shell", "pidof", self.pkg_name],
-                timeout=self.adb_timeout,
-            )
-            pid = out.strip()
-            if pid:
-                self.pid_last_seen = pid
-                self.app_died_at = ""  # reset if app restarted
-            elif not self.app_died_at:
-                self.app_died_at = now_utc_iso()
+            try:
+                _, out, _ = run_command_capture(
+                    [self.adb_bin, "shell", "pidof", self.pkg_name],
+                    timeout=self.adb_timeout,
+                )
+                pid = out.strip()
+                if pid:
+                    self.pid_last_seen = pid
+                    self.app_died_at = ""  # reset if app restarted
+                elif not self.app_died_at:
+                    self.app_died_at = now_utc_iso()
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
 
 
 class Stage2DynamicRunner:
@@ -392,7 +407,10 @@ class Stage2DynamicRunner:
             # Step 7: Launch app → resolve PID → start PID logcat + monitor
             # ----------------------------------------------------------------
             exerciser: UiExerciser | None = None
-            project_dir = run_dir.parent.parent.parent
+            project_dir = _find_project_dir(run_dir)
+            if project_dir is None:
+                log("[WARN] Не удалось определить project_dir — manifest_data будет пуст.")
+                project_dir = run_dir  # fallback: rglob will find nothing, gracefully
             manifest_data = _load_manifest_data(project_dir)
 
             if pkg_name:
@@ -595,7 +613,15 @@ class Stage2DynamicRunner:
                 pcap_pulled = traffic.stop_and_pull(pcap_local)
 
             if _mitm_proc is not None:
-                _mitm_proc.terminate()
+                try:
+                    _mitm_proc.terminate()
+                    _mitm_proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    _mitm_proc.kill()
+                    _mitm_proc.wait()
+                except Exception:  # pylint: disable=broad-exception-caught
+                    pass
+                _mitm_proc = None
                 try:
                     from analysis.stage2.mitm import unset_emulator_proxy  # noqa: PLC0415
                     unset_emulator_proxy(emulator_serial)
@@ -823,6 +849,16 @@ class Stage2DynamicRunner:
             run.finished_at = now_utc_iso()  # UTC — fixes duration_sec bug
             log("Этап 2 успешно завершён.")
         finally:
+            # Ensure mitmproxy is stopped if not already stopped in step 8
+            if _mitm_proc is not None:
+                try:
+                    _mitm_proc.terminate()
+                    _mitm_proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    _mitm_proc.kill()
+                    _mitm_proc.wait()
+                except Exception:  # pylint: disable=broad-exception-caught
+                    pass
             # Step 11: Stop emulator (always)
             try:
                 emulator.stop()
@@ -917,13 +953,17 @@ class Stage2DynamicRunner:
             out_path.parent.mkdir(parents=True, exist_ok=True)
             if code == 0 and out.strip():
                 out_path.write_text(out, encoding="utf-8", errors="replace")
-                # Parse file lines (ls -la output): extract paths
-                paths = [
-                    ln.strip().split()[-1]
-                    for ln in out.splitlines()
-                    if ln.strip() and not ln.startswith("total") and not ln.startswith("/")
-                    and ":" in ln
-                ]
+                # Parse file lines (ls -laR output): extract filename from lines with
+                # at least 8 fields (permissions links user group size date time name).
+                # Skip header/total/directory lines.
+                paths = []
+                for ln in out.splitlines():
+                    stripped = ln.strip()
+                    if not stripped or stripped.startswith("total") or stripped.startswith("/"):
+                        continue
+                    parts = stripped.split()
+                    if len(parts) >= 8:
+                        paths.append(parts[-1])
                 log(f"Каталог данных приложения: найдено {len(paths)} файловых записей.")
                 return paths
             else:
@@ -955,7 +995,7 @@ class Stage2DynamicRunner:
     def _load_stage1_findings(self, run_dir: Path, log: Callable) -> tuple[list[dict], str]:
         """Load findings from the most recent Stage1 run for the same project."""
         try:
-            project_dir = run_dir.parent.parent.parent
+            project_dir = _find_project_dir(run_dir) or run_dir
             candidates = sorted(project_dir.rglob("findings/findings.json"), reverse=True)
         except Exception as exc:  # pylint: disable=broad-exception-caught
             log(f"Не удалось найти Stage1 findings для корреляции: {exc}")
@@ -1353,7 +1393,7 @@ class Stage2DynamicRunner:
     def _get_package_name(self, apk_path: Path, run_dir: Path, log: Callable) -> str:
         # Try to read from Stage1 report
         try:
-            project_dir = run_dir.parent.parent.parent
+            project_dir = _find_project_dir(run_dir) or run_dir
             for report_path in sorted(project_dir.rglob("stage1_report.json"), reverse=True):
                 try:
                     data = json.loads(report_path.read_text(encoding="utf-8"))

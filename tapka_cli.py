@@ -31,6 +31,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 import traceback
@@ -89,6 +90,10 @@ def _ok(msg: str) -> None:
 
 def _err(msg: str) -> None:
     print(f"[tapka] ✗ {msg}", file=sys.stderr, flush=True)
+
+
+def _warn(msg: str) -> None:
+    print(f"[tapka] ! {msg}", file=sys.stderr, flush=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -170,7 +175,7 @@ def run_stage2(storage: Storage, project_id: str, config: Stage2Config) -> bool:
         _info(f"Статус: {run.status}")
         run_dir = storage.get_run_dir(project_id, run.run_id)
         _info(f"Run dir: {run_dir}")
-        return True
+        return run.status == "Done"
     except Exception:  # pylint: disable=broad-exception-caught
         _err("Этап 2 завершился ошибкой:")
         traceback.print_exc(file=sys.stderr)
@@ -289,6 +294,19 @@ def main() -> int:
         _err(f"Файл не является APK: {apk_path}")
         return 1
 
+    # BUG-CLI-01: validate --output path before running any analysis
+    if args.output:
+        _output_path = Path(args.output)
+        if not _output_path.parent.exists():
+            _err(f"Директория не существует: {_output_path.parent}")
+            return 1
+        if _output_path.exists() and _output_path.is_dir():
+            _err(f"Путь является директорией: {_output_path}")
+            return 1
+        if not os.access(_output_path.parent, os.W_OK):
+            _err(f"Нет права на запись: {_output_path.parent}")
+            return 1
+
     # Рабочая область
     settings = load_settings()
     workspace = args.workspace or settings.get("workspace") or DEFAULT_WORKSPACE
@@ -342,6 +360,13 @@ def main() -> int:
 
     project_id = project.project_id
     overall_ok = True
+
+    # BUG-P-02: warn when --stage2 runs without --stage1
+    if args.stage2 and not args.stage1:
+        _warn(
+            "--stage2 запущен без --stage1: activity_fuzz и deeplink_fuzz "
+            "могут не найти manifest-данные (stage1_report.json отсутствует)."
+        )
 
     # ── Stage 1 ───────────────────────────────────────────────────────────────
     if args.stage1:
