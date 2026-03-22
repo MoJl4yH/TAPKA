@@ -568,7 +568,7 @@ class Stage2DynamicRunner:
             log("Шаг 8: остановка UI-экзерсайзера, logcat и захвата трафика...")
             if exerciser is not None:
                 exerciser.stop()
-                exerciser_sent = exerciser._sent  # noqa: SLF001
+                exerciser_sent += exerciser._sent  # noqa: SLF001
 
             if pid_monitor is not None:
                 pid_monitor.stop()

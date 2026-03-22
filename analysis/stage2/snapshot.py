@@ -37,19 +37,22 @@ class SystemSnapshot:
         local_tar = out_dir / f"fs_{tag}.tar"
         self._log(f"Creating filesystem snapshot tar (tag={tag})...")
         if package_name:
-            # Scope to package-specific directories to reduce noise
-            dirs = " ".join([
+            # Scope to package-specific directories to reduce noise.
+            # Use list args (not shell string) to prevent shell injection via package_name.
+            dirs = [
                 f"/data/data/{package_name}",
                 f"/sdcard/Android/data/{package_name}",
                 f"/sdcard/Android/media/{package_name}",
-            ])
-            tar_cmd = f"tar -cf {remote_tar} {dirs} 2>/dev/null; echo done"
+            ]
+            run_command_capture(
+                [adb, "shell", "tar", "-cf", remote_tar] + dirs,
+                timeout=self.adb_timeout_sec * 5,
+            )
         else:
-            tar_cmd = f"tar -cf {remote_tar} /data/data 2>/dev/null; echo done"
-        run_command_capture(
-            [adb, "shell", tar_cmd],
-            timeout=self.adb_timeout_sec * 5,
-        )
+            run_command_capture(
+                [adb, "shell", "tar", "-cf", remote_tar, "/data/data"],
+                timeout=self.adb_timeout_sec * 5,
+            )
         run_command_capture(
             [adb, "pull", remote_tar, str(local_tar)],
             timeout=self.adb_timeout_sec * 3,

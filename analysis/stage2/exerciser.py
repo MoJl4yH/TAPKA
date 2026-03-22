@@ -105,6 +105,9 @@ class UiExerciser:
             try:
                 self._proc.terminate()
                 self._proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+                self._proc.wait()
             except Exception:  # pylint: disable=broad-exception-caught
                 pass
             self._proc = None

@@ -962,7 +962,14 @@ class Stage3MobSFRunner:
             return summary, artifacts
         finally:
             if adb_bridge_proc is not None:
-                adb_bridge_proc.terminate()
+                try:
+                    adb_bridge_proc.terminate()
+                    adb_bridge_proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    adb_bridge_proc.kill()
+                    adb_bridge_proc.wait()
+                except Exception:  # pylint: disable=broad-exception-caught
+                    pass
             if mgr is not None:
                 try:
                     mgr.stop()

@@ -104,9 +104,9 @@ def run_full_pipeline(
                 runtime_duration_sec=cfg.runtime_sec,
             )
             runner2 = Stage2DynamicRunner(storage, config=cfg2, on_progress=log)
-            runner2.run(project_id)
-            result.stage2_ok = True
-            log("Stage 2 OK")
+            run2 = runner2.run(project_id)
+            result.stage2_ok = run2.status == "Done"
+            log(f"Stage 2 {'OK' if result.stage2_ok else f'завершён со статусом: {run2.status}'}")
         except Exception as exc:  # pylint: disable=broad-exception-caught
             result.errors.append(f"stage2: {exc}")
             log(f"Stage 2 FAILED: {exc}")
