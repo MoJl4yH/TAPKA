@@ -739,12 +739,9 @@ class ReportManager:
                 else:
                     sev = computed  # type: ignore[assignment]
             else:
-                # Unknown category — fall back to confidence-based mapping
-                sev = "info"
-                if confidence == "C3":
-                    sev = "high"
-                elif confidence == "C2":
-                    sev = "medium"
+                # Unknown category (not in impact_table) — use "low" as a conservative
+                # default rather than inflating severity based on confidence alone.
+                sev = "low"
             title = f.get("title", "")
             if not title:
                 continue
@@ -2669,6 +2666,72 @@ class ReportManager:
     # Combined-report helpers
     # ─────────────────────────────────────────────────────────────────────────
 
+    def _apply_stage2_correlation(
+        self,
+        project_id: str,
+        findings_by_stage: dict[str, list[FindingV2]],
+    ) -> None:
+        """Promote Stage1 findings confirmed by Stage2 runtime evidence.
+
+        Reads stage2_data["correlation"]["confirmed_indicators"] from the latest
+        Stage2 report and adds the "combo_confirmed" tag to matching Stage1 FindingV2
+        objects so that compute_score() awards the tag_boost=+1.0 for cross-stage
+        confirmation. Also attaches a Stage2 source reference to the finding.
+
+        Mutates findings_by_stage["stage1"] in-place; safe to call when stage1 or
+        stage2 data is absent.
+        """
+        stage1_findings = findings_by_stage.get("stage1")
+        if not stage1_findings:
+            return
+
+        latest2 = self.storage.get_latest_run(project_id, STAGE_DYNAMIC)
+        if not latest2:
+            return
+        _, run_dir2 = latest2
+        json_path2, _ = self.report_paths(run_dir2, STAGE_DYNAMIC)
+        if not json_path2.exists():
+            return
+
+        try:
+            payload2 = json.loads(json_path2.read_text(encoding="utf-8"))
+            stage2_data = payload2.get("stage2_data") or {}
+        except (json.JSONDecodeError, OSError):
+            return
+
+        confirmed = stage2_data.get("correlation", {}).get("confirmed_indicators") or []
+        if not confirmed:
+            return
+
+        # Build set of category IDs confirmed by Stage2 runtime evidence.
+        confirmed_ids: set[str] = set()
+        confirmed_evidence: dict[str, str] = {}
+        for item in confirmed:
+            if not isinstance(item, dict):
+                continue
+            fid = item.get("finding_id") or item.get("category") or ""
+            if fid:
+                confirmed_ids.add(fid)
+                confirmed_evidence[fid] = str(item.get("evidence") or "")
+
+        for f in stage1_findings:
+            if f.category not in confirmed_ids:
+                continue
+            tags = list(f.tags or [])
+            if "combo_confirmed" not in tags:
+                tags.append("combo_confirmed")
+            f.tags = tags
+            # Attach Stage2 source so the finding traces back to runtime evidence.
+            evidence_note = confirmed_evidence.get(f.category, "")
+            stage2_source = SourceRefV2(
+                stage=STAGE_DYNAMIC,
+                tool="stage2_correlation",
+                ref=str(json_path2),
+                rule=evidence_note or None,
+            )
+            if stage2_source not in (f.sources or []):
+                f.sources = list(f.sources or []) + [stage2_source]
+
     def load_all_findings(self, project_id: str) -> dict[str, list[FindingV2]]:
         """Собирает FindingV2 из run-директорий всех стадий одного проекта.
 
@@ -2727,6 +2790,13 @@ class ReportManager:
         from models.report_v2 import SecurityScoreV2
 
         findings_by_stage = self.load_all_findings(project_id)
+
+        # Apply Stage2 correlation data: mark Stage1 findings confirmed at runtime
+        # with the "combo_confirmed" tag so scoring awards the tag_boost=+1.0.
+        # stage2_data["correlation"]["confirmed_indicators"] is computed by runner.py
+        # but previously never used in report generation (F7 fix).
+        self._apply_stage2_correlation(project_id, findings_by_stage)
+
         # BUG-REP-03: guard against scoring errors so report generation always succeeds
         try:
             security = compute_score(findings_by_stage)
