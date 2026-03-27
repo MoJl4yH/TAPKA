@@ -109,18 +109,36 @@ class SeverityEngine:
         "checksec_no_canary": 3,
         "checksec_no_pie": 2,
         "checksec_no_relro": 2,
+        # --- Stage2: runtime network/FS findings (previously fallback-scored) ---
+        "sec_runtime_tls_weakness": 4,
+        "sec_runtime_cleartext_transport": 3,
+        "ndv_data_exfiltration_suspected": 4,
+        "anomaly_dns_tunneling_suspected": 4,
+        "sec_runtime_log_sensitive_data": 3,
+        "sec_runtime_sqlite_plaintext": 3,
+        "sec_runtime_clipboard_leak": 3,
         # --- Stage3: MobSF ---
-        "mobsf_appsec": 3,
+        "mobsf_appsec_high": 5,      # MobSF appsec_high[] — critical findings
+        "mobsf_appsec_warning": 3,   # MobSF appsec_warning[] — advisory
+        "mobsf_appsec": 3,           # legacy / backward-compat fallback
         # --- Stage3: Quark ---
         "quark_rule_match": 3,
-        # --- Stage3: APKiD (informational — packer/obfuscator detection) ---
-        "apkid_match": 1,
+        # --- Stage3: APKiD (differentiated by detection type) ---
+        "supplychain_packer_detected": 3,     # packer: Jiagu, iJiaMi, Bangcle, APKProtect
+        "supplychain_obfuscator_detected": 2, # obfuscator: DexGuard, Allatori
+        "apkid_anti_vm": 3,                   # anti-VM / anti-emulator signatures
+        "apkid_compiler": 1,                  # compiler: D8, R8, dexlib (normal toolchain)
+        "apkid_match": 1,                     # legacy fallback for unknown apkid categories
+        # --- semgrep generic fallback ---
+        "sec_semgrep_generic": 2,
         # --- Stage3: APKLeaks ---
         "apkleaks_secret": 5,
         "apkleaks_password": 4,
         "apkleaks_token": 4,
         "apkleaks_api_key": 4,
         "apkleaks_generic": 1,
+        # --- Stage3: Privacy trackers ---
+        "privacy_tracker_sdk_detected": 2,
     }
 
     thresholds = {"high": 3.5, "medium": 2.0, "low": 1.0}
@@ -151,6 +169,13 @@ class SeverityEngine:
         "sec_network_security_config_weak": "medium",
         "ndv_payload_decode_load": "high",
         "supplychain_debug_certificate": "medium",
+        # Stage2 runtime — confirmed empirical evidence
+        "ndv_data_exfiltration_suspected": "high",
+        "sec_runtime_tls_weakness": "medium",
+        # Stage3 MobSF — high findings are always high severity
+        "mobsf_appsec_high": "high",
+        # Stage3 APKiD packer — supply chain risk
+        "supplychain_packer_detected": "medium",
     }
 
     @classmethod
