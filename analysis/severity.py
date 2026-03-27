@@ -80,6 +80,10 @@ class SeverityEngine:
         "vul_backup_enabled": 2,
         "vul_debuggable_true": 5,
         "vul_task_hijacking": 3,
+        "vul_exported_service_no_permission": 4,
+        "vul_content_provider_sql_injection": 4,
+        # --- sec_* backup ---
+        "sec_backup_data_extraction_rules": 3,
         # --- secret_* ---
         "secret_private_key_pem": 5,
         "secret_hardcoded_token_or_apikey": 4,

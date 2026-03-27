@@ -529,6 +529,16 @@ class Stage1StaticRunner:
             "tags": set(),
             "source": "sql_injection",
         },
+        # ContentProvider SQL injection: selection param concatenated into raw SQL
+        {
+            "category": "vul_content_provider_sql_injection",
+            "pattern": r'"[^"]*"\s*\+\s*selection|selection\s*\+\s*"|rawQuery\([^)]*\+\s*(?:selection|sortOrder)',
+            "targets": ("jadx",),
+            "confidence": "C2",
+            "evidence_type": "code",
+            "tags": set(),
+            "source": "content_provider_sqli",
+        },
         # --- Sensitive data logging ---
         # C2: value is passed directly into log (variable or concatenation after keyword)
         # BUG-39: split into C2 (actual value logged) and C1 (concept mention)
@@ -2136,11 +2146,16 @@ class Stage1StaticRunner:
                 exported = self._component_exported(component, tag, ns)
                 name = component.get(f"{ns}name") or component.get("name") or "unknown"
                 if exported and not self._component_has_permission(component, ns):
+                    _exp_category = (
+                        "vul_exported_service_no_permission"
+                        if tag == "service"
+                        else "vul_exported_component_no_permission"
+                    )
                     self._add_manifest_finding(
                         findings,
                         manifest_path,
                         run_dir,
-                        "vul_exported_component_no_permission",
+                        _exp_category,
                         f"{tag}:{name} exported without permission",
                         tags={"exported"},
                         sources=[f"manifest:exported:{tag}"],
@@ -2308,6 +2323,17 @@ class Stage1StaticRunner:
                 evidence,
                 sources=["manifest:allowBackup"],
             )
+        if target_sdk is not None and target_sdk >= 31 and application is not None:
+            data_extraction_rules = application.get(f"{ns}dataExtractionRules")
+            if not data_extraction_rules:
+                self._add_manifest_finding(
+                    findings,
+                    manifest_path,
+                    run_dir,
+                    "sec_backup_data_extraction_rules",
+                    "android:dataExtractionRules missing (targetSdk >= 31)",
+                    sources=["manifest:dataExtractionRules"],
+                )
         if uses_cleartext:
             self._add_manifest_finding(
                 findings,
@@ -2985,9 +3011,13 @@ class Stage1StaticRunner:
             sg_findings = run_semgrep(
                 jadx_src_dir=paths.jadx_dir,
                 output_dir=semgrep_out,
-                on_progress=None,
+                on_progress=self.on_progress,
             )
-        except Exception:  # pylint: disable=broad-exception-caught
+        except Exception as _exc:  # pylint: disable=broad-exception-caught
+            import logging as _logging  # noqa: PLC0415
+            _logging.getLogger(__name__).warning("semgrep runner failed: %s", _exc)
+            if self.on_progress:
+                self.on_progress(f"[semgrep] ОШИБКА: {_exc}")
             return []
 
         findings: list[Finding] = []
@@ -3032,7 +3062,9 @@ class Stage1StaticRunner:
                 output_dir=checksec_out,
                 on_progress=None,
             )
-        except Exception:  # pylint: disable=broad-exception-caught
+        except Exception as _exc:  # pylint: disable=broad-exception-caught
+            import logging as _logging  # noqa: PLC0415
+            _logging.getLogger(__name__).debug("checksec runner failed: %s", _exc)
             return []
 
         findings: list[Finding] = []

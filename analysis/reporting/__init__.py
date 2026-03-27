@@ -1727,6 +1727,36 @@ class ReportManager:
                 )
             )
 
+        # MobSF privacy trackers
+        trackers_detected_count = mobsf_data.get("trackers_detected")
+        if isinstance(trackers_detected_count, int) and trackers_detected_count > 0:
+            tracker_names: list[str] = mobsf_data.get("trackers_top", []) or []
+            snippet = ", ".join(tracker_names[:5]) if tracker_names else f"detected={trackers_detected_count}"
+            findings.append(
+                FindingV2(
+                    id=_hash_id("fnd", "mobsf", "trackers", str(trackers_detected_count)),
+                    category="privacy_tracker_sdk_detected",
+                    title=f"Обнаружены SDK трекеров: {trackers_detected_count}",
+                    severity="low",
+                    confidence="C2",
+                    tags=["mobsf", "privacy", "tracker"],
+                    description=f"MobSF обнаружил {trackers_detected_count} SDK для отслеживания пользователей.",
+                    recommendation="Проверьте необходимость трекеров и убедитесь, что они раскрыты в политике конфиденциальности.",
+                    evidence=[
+                        EvidenceItemV2(
+                            kind="string",
+                            file=mobsf_ref,
+                            line=None,
+                            snippet=snippet,
+                            ref=mobsf_ref,
+                        )
+                    ],
+                    sources=[
+                        SourceRefV2(stage=STAGE_CROSS_TOOL, tool="mobsf", ref=mobsf_ref, rule="trackers")
+                    ],
+                )
+            )
+
         return findings
 
     def _build_stage1_sections(self, run_dir: Path, findings: list[Finding]) -> list[SectionV2]:
@@ -2000,6 +2030,8 @@ class ReportManager:
         urls_total = None
         permissions_total = None
         exported_total = None
+        trackers_detected = None
+        trackers_top: list[str] = []
 
         if static is not None:
             appsec_high = [
@@ -2034,6 +2066,10 @@ class ReportManager:
             urls_total = getattr(static, "urls_total", None)
             permissions_total = getattr(static, "permissions_total", None)
             exported_total = getattr(static, "exported_total", None)
+            _td = getattr(static, "trackers_detected", None)
+            if isinstance(_td, int):
+                trackers_detected = _td
+            trackers_top = [str(v) for v in (getattr(static, "trackers_top", []) or []) if str(v).strip()]
 
         if isinstance(raw, dict):
             package_name = raw.get("package_name") or package_name
@@ -2114,6 +2150,19 @@ class ReportManager:
             elif isinstance(raw.get("exported_count"), int):
                 exported_total = int(raw.get("exported_count"))
 
+            if trackers_detected is None:
+                raw_trackers = raw.get("trackers")
+                if isinstance(raw_trackers, dict):
+                    _td = raw_trackers.get("detected_trackers")
+                    if isinstance(_td, int):
+                        trackers_detected = _td
+                    _tt = raw_trackers.get("trackers")
+                    if isinstance(_tt, list) and not trackers_top:
+                        trackers_top = [str(v) for v in _tt if isinstance(v, str)][:10]
+                _appsec_td = (raw.get("appsec") or {}).get("trackers")
+                if isinstance(_appsec_td, int) and trackers_detected is None:
+                    trackers_detected = _appsec_td
+
         return {
             "present": mobsf_report is not None or isinstance(raw, dict),
             "ref": raw_rel or "artifacts/mobsf/static/report.json",
@@ -2133,6 +2182,8 @@ class ReportManager:
             "urls_top": urls_top[:10],
             "domains_top": domains_top[:10],
             "permissions_top": permissions_top[:10],
+            "trackers_detected": trackers_detected,
+            "trackers_top": trackers_top[:10],
         }
 
     def _extract_stage3_quark(self, run_dir: Path, quark_report) -> dict:
