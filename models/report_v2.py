@@ -101,6 +101,17 @@ class FindingV2(BaseModel):
     evidence: list[EvidenceItemV2] = Field(default_factory=list)
     sources: list[SourceRefV2] = Field(default_factory=list)
     related_indicators: list[str] = Field(default_factory=list)
+    # Standard compliance identifiers — populated where available.
+    cwe_id: str | None = None      # e.g. "CWE-295", "CWE-89"
+    mastg_id: str | None = None    # e.g. "MASTG-TEST-0021"
+    masvs_id: str | None = None    # e.g. "MASVS-NETWORK-1"
+    # Runtime origin flag: True when finding comes from dynamic analysis (Stage2/Frida).
+    is_runtime: bool = False
+    # Cross-stage validation status.
+    # potential  — static analysis only, not confirmed at runtime
+    # validated  — confirmed by Stage2 runtime evidence (AppOps, network, FS)
+    # inferred   — behavioural chain (Quark) or correlated from multiple weak signals
+    validation_status: str = "potential"
 
 
 class SectionV2(BaseModel):
@@ -118,6 +129,15 @@ class SecurityScoreV2(BaseModel):
     stage1_contribution: float | None = None
     stage2_contribution: float | None = None
     stage3_contribution: float | None = None
+    # Finding counts for report summary display.
+    total_findings: int = 0
+    high_findings: int = 0
+    medium_findings: int = 0
+    low_findings: int = 0
+    # Top contributing categories (up to 5), sorted by raw item_score descending.
+    top_categories: list[str] = Field(default_factory=list)
+    # Number of cross-stage duplicate findings collapsed by dedup logic.
+    dedup_count: int = 0
 
 
 class ReportV2(BaseModel):

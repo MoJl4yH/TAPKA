@@ -778,6 +778,8 @@ class ReportManager:
                         )
                     ],
                     related_indicators=[],
+                    is_runtime=True,
+                    validation_status="validated",
                 )
             )
         return result
@@ -2804,12 +2806,48 @@ class ReportManager:
             from analysis.scoring import SecurityScore
             security = SecurityScore(total=0.0, risk_label="unknown", stages={}, breakdown={})
 
+        # Collect all findings before building SecurityScoreV2 counts.
+        all_findings_full: list[FindingV2] = []
+        for stage_key, stage_findings in findings_by_stage.items():
+            for f in stage_findings:
+                # Mark Stage2 findings as runtime origin.
+                if stage_key == "stage2" and not f.is_runtime:
+                    f.is_runtime = True
+                # Set validation_status for Stage1 findings confirmed by Stage2 correlation.
+                if stage_key == "stage1" and "combo_confirmed" in (f.tags or []):
+                    f.validation_status = "validated"
+                # Quark behavioural findings are inferred.
+                if f.category == "quark_rule_match" and f.validation_status == "potential":
+                    f.validation_status = "inferred"
+            all_findings_full.extend(stage_findings)
+
+        # Build SecurityScoreV2 with finding counts and top categories.
+        all_high = sum(1 for f in all_findings_full if f.severity == "high")
+        all_medium = sum(1 for f in all_findings_full if f.severity == "medium")
+        all_low = sum(1 for f in all_findings_full if f.severity == "low")
+        # Top 5 categories by highest item_score contribution.
+        from analysis.severity import SeverityEngine as _SE
+        from analysis.scoring import CONF_MULT as _CM
+        def _item_score(f: FindingV2) -> float:
+            base = _SE.impact_table.get(f.category, 0)
+            conf = f.confidence if f.confidence in _CM else "C2"
+            return base * _CM[conf]
+        cat_scores: dict[str, float] = {}
+        for f in all_findings_full:
+            cat_scores[f.category] = max(cat_scores.get(f.category, 0.0), _item_score(f))
+        top_cats = sorted(cat_scores, key=lambda c: cat_scores[c], reverse=True)[:5]
+
         score_v2 = SecurityScoreV2(
             total=security.total,
             risk_label=security.risk_label,
             stage1_contribution=security.breakdown.get("stage1"),
             stage2_contribution=security.breakdown.get("stage2"),
             stage3_contribution=security.breakdown.get("stage3"),
+            total_findings=len(all_findings_full),
+            high_findings=all_high,
+            medium_findings=all_medium,
+            low_findings=all_low,
+            top_categories=top_cats,
         )
 
         all_findings: list[FindingV2] = []
