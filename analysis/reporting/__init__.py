@@ -584,8 +584,15 @@ class ReportManager:
         tools = self._collect_stage2_tools(run_dir, stage2_data)
 
         attribution = stage2_data.get("attribution") or {}
+        package_name = attribution.get("package_name")
+        # Fallback: check other stage2_data locations if attribution is empty (early Stage2 failure)
+        if not package_name:
+            package_name = (
+                stage2_data.get("package_name")
+                or stage2_data.get("meta", {}).get("package_name")
+            )
         pkg_info = {
-            "package_name": attribution.get("package_name"),
+            "package_name": package_name,
             "version_name": attribution.get("version_name"),
             "version_code": attribution.get("version_code"),
         }
@@ -1517,10 +1524,11 @@ class ReportManager:
                 related = list(indicator_index.get(title, []))
                 if section:
                     related.extend(indicator_index.get(section, []))
+                mobsf_category = "mobsf_appsec_high" if severity == "high" else "mobsf_appsec_warning"
                 findings.append(
                     FindingV2(
                         id=_hash_id("fnd", "mobsf", title, section),
-                        category="mobsf_appsec",
+                        category=mobsf_category,
                         title=title,
                         severity=_severity_hint(severity),
                         confidence="C2",
@@ -1603,6 +1611,16 @@ class ReportManager:
                 )
             )
 
+        # APKiD detection-type → (finding_category, severity)
+        _APKID_CATEGORY_MAP: dict[str, tuple[str, str]] = {
+            "packer":     ("supplychain_packer_detected",     "medium"),
+            "protector":  ("supplychain_packer_detected",     "medium"),
+            "obfuscator": ("supplychain_obfuscator_detected", "low"),
+            "compiler":   ("apkid_compiler",                  "info"),
+            "anti_vm":    ("apkid_anti_vm",                   "medium"),
+            "anti_debug": ("apkid_anti_vm",                   "medium"),
+        }
+
         apkid_data = stage3_data.get("apkid", {})
         apkid_ref = apkid_data.get("ref") if isinstance(apkid_data.get("ref"), str) else "tools/apkid/raw/apkid.json"
         for item in apkid_data.get("matches", []) or []:
@@ -1613,14 +1631,17 @@ class ReportManager:
             file_path = str(item.get("file_path") or "-")
             if not category or not value:
                 continue
+            apkid_finding_cat, apkid_severity = _APKID_CATEGORY_MAP.get(
+                category.lower(), ("apkid_match", "low")
+            )
             evidence_value = f"{category}: {value}"
             related = list(indicator_index.get(evidence_value, []))
             findings.append(
                 FindingV2(
                     id=_hash_id("fnd", "apkid", category, value, file_path),
-                    category="apkid_match",
-                    title=f"Совпадение APKiD: {category}",
-                    severity="low",
+                    category=apkid_finding_cat,
+                    title=f"APKiD: {category} — {value}",
+                    severity=_severity_hint(apkid_severity),
                     confidence="C2",
                     tags=["apkid", category],
                     description="APKiD обнаружил сигнатуру упаковщика, обфускации или механизма защиты.",
@@ -1656,17 +1677,40 @@ class ReportManager:
                 continue
             related = list(indicator_index.get(first_value, []))
             lowered = group_name.lower()
-            finding_severity: SeverityHintV2 = "low"
-            if any(token in lowered for token in ("secret", "password", "private", "token", "key")):
-                finding_severity = "medium"
-            category_slug = re.sub(r"[^a-z0-9]+", "_", lowered).strip("_") or "generic"
+            # Normalize group_name to a stable impact_table key via keyword matching.
+            # Raw re.sub slugs (e.g. "private_keys", "google_api_key") never matched
+            # impact_table entries (apkleaks_secret, apkleaks_password, …).
+            if any(tok in lowered for tok in ("private", "pem", "rsa", "certificate", "secret")):
+                apkleaks_cat = "apkleaks_secret"
+                apkleaks_conf: str = "C2"   # PEM/RSA/private-key header → low FP
+            elif any(tok in lowered for tok in ("password", "passwd")):
+                apkleaks_cat = "apkleaks_password"
+                apkleaks_conf = "C2"
+            elif any(tok in lowered for tok in ("token", "bearer", "oauth")):
+                apkleaks_cat = "apkleaks_token"
+                apkleaks_conf = "C2"
+            elif any(tok in lowered for tok in ("api_key", "apikey", "api key", "api")):
+                apkleaks_cat = "apkleaks_api_key"
+                apkleaks_conf = "C1"
+            else:
+                apkleaks_cat = "apkleaks_generic"
+                apkleaks_conf = "C1"
+            # Compute severity via SeverityEngine so impact_table values are respected.
+            _al_impact = SeverityEngine.impact_table.get(apkleaks_cat, 1)
+            _al_mult = SeverityEngine.confidence_multipliers.get(apkleaks_conf, 0.5)
+            _al_score = _al_impact * _al_mult
+            finding_severity: SeverityHintV2 = SeverityEngine._severity_for_score(_al_score)  # pylint: disable=protected-access
+            # Apply severity_floor if defined for the category.
+            _al_floor = SeverityEngine.severity_floor.get(apkleaks_cat)
+            if _al_floor and SeverityEngine._severity_rank(finding_severity) < SeverityEngine._severity_rank(_al_floor):  # pylint: disable=protected-access
+                finding_severity = _al_floor  # type: ignore[assignment]
             findings.append(
                 FindingV2(
                     id=_hash_id("fnd", "apkleaks", group_name, str(count)),
-                    category=f"apkleaks_{category_slug}",
+                    category=apkleaks_cat,
                     title=f"Группа APKLeaks: {group_name}",
                     severity=finding_severity,
-                    confidence="C1",
+                    confidence=apkleaks_conf,  # type: ignore[arg-type]
                     tags=["apkleaks", group_name],
                     description=f"APKLeaks выявил {count if isinstance(count, int) else 0} совпадений в группе {group_name}.",
                     recommendation="Проверьте найденные значения и удалите из APK непубличные секреты и конфиденциальную конфигурацию.",
