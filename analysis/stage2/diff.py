@@ -85,7 +85,7 @@ class SnapshotDiff:
             if not str(member_path).startswith(str(resolved_out) + os.sep) and member_path != resolved_out:
                 self._log(f"Skipping path-traversal tar member: {member.name}")
                 continue
-            tar.extract(member, path=str(out_dir))  # noqa: S202
+            tar.extract(member, path=str(out_dir), set_attrs=False)  # noqa: S202
 
     def _extract_tar(self, tar_path: str, out_dir: Path) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)

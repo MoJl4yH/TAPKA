@@ -56,3 +56,4 @@ tests/
 android-insecurebankv2/
 docs/
 test_apk_file
+analysis/semgrep/rules/mindedsecurity/

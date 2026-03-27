@@ -350,7 +350,6 @@ class QuarkRunner:
         tmp_dir.mkdir(parents=True, exist_ok=True)
 
         log_path = out_dir / "per_rule_log.jsonl"
-        log_handle = log_path.open("w", encoding="utf-8")
 
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
@@ -358,122 +357,122 @@ class QuarkRunner:
         MAX_CONSECUTIVE_FAILURES = 10
         consecutive_failures = 0
 
-        for idx, rule_path in enumerate(rule_files):
-            rule_name = rule_path.stem
-            progress_pct = int((idx / len(rule_files)) * 100)
+        with log_path.open("w", encoding="utf-8") as log_handle:
+            for idx, rule_path in enumerate(rule_files):
+                rule_name = rule_path.stem
+                progress_pct = int((idx / len(rule_files)) * 100)
 
-            self._emit(f"QUARK_RULE:{idx + 1}/{len(rule_files)}:{rule_name}")
-            self._emit(f"{progress_pct}%")
+                self._emit(f"QUARK_RULE:{idx + 1}/{len(rule_files)}:{rule_name}")
+                self._emit(f"{progress_pct}%")
 
-            rule_output = tmp_dir / f"{rule_name}.json"
-            cmd = [
-                QUARK_COMMAND,
-                "-r", str(rule_path),
-                "-a", str(apk_path),
-                "--output", str(rule_output),
-            ]
+                rule_output = tmp_dir / f"{rule_name}.json"
+                cmd = [
+                    QUARK_COMMAND,
+                    "-r", str(rule_path),
+                    "-a", str(apk_path),
+                    "--output", str(rule_output),
+                ]
 
-            entry: dict = {
-                "rule": rule_name,
-                "rule_file": rule_path.name,
-                "status": "pending",
-                "exit_code": None,
-                "duration_sec": None,
-                "error": None,
-                "oom_detected": False,
-            }
+                entry: dict = {
+                    "rule": rule_name,
+                    "rule_file": rule_path.name,
+                    "status": "pending",
+                    "exit_code": None,
+                    "duration_sec": None,
+                    "error": None,
+                    "oom_detected": False,
+                }
 
-            try:
-                start = time.monotonic()
-                exit_code, _stdout, stderr = run_command_capture(
-                    cmd,
-                    env=env,
-                    timeout=per_rule_timeout,
-                    kill_process_group=True,
-                )
-                entry["duration_sec"] = round(time.monotonic() - start, 2)
-                entry["exit_code"] = exit_code
+                try:
+                    start = time.monotonic()
+                    exit_code, _, stderr = run_command_capture(
+                        cmd,
+                        env=env,
+                        timeout=per_rule_timeout,
+                        kill_process_group=True,
+                    )
+                    entry["duration_sec"] = round(time.monotonic() - start, 2)
+                    entry["exit_code"] = exit_code
 
-                # OOM detection (exit 137 = SIGKILL, or "Killed" in stderr)
-                is_oom = exit_code in (137, 9) or "Killed" in (stderr or "")
-                entry["oom_detected"] = is_oom
+                    # OOM detection (exit 137 = SIGKILL, or "Killed" in stderr)
+                    is_oom = exit_code in (137, 9) or "Killed" in (stderr or "")
+                    entry["oom_detected"] = is_oom
 
-                if is_oom:
-                    entry["status"] = "oom"
-                    entry["error"] = f"OOM-like termination (exit {exit_code})"
-                    stats["oom"] += 1
-                    stats["failed"] += 1
-                    consecutive_failures += 1
-                    self._emit(f"  Rule {rule_name}: OOM (exit {exit_code})")
+                    if is_oom:
+                        entry["status"] = "oom"
+                        entry["error"] = f"OOM-like termination (exit {exit_code})"
+                        stats["oom"] += 1
+                        stats["failed"] += 1
+                        consecutive_failures += 1
+                        self._emit(f"  Rule {rule_name}: OOM (exit {exit_code})")
 
-                elif exit_code == 0 and rule_output.exists():
-                    try:
-                        data = json.loads(rule_output.read_text(encoding="utf-8"))
-                        rule_crimes = data.get("crimes", [])
+                    elif exit_code == 0 and rule_output.exists():
+                        try:
+                            data = json.loads(rule_output.read_text(encoding="utf-8"))
+                            rule_crimes = data.get("crimes", [])
 
-                        if not apk_meta:
-                            apk_meta = {
-                                k: data.get(k, "")
-                                for k in ("md5", "apk_filename", "size_bytes")
-                            }
+                            if not apk_meta:
+                                apk_meta = {
+                                    k: data.get(k, "")
+                                    for k in ("md5", "apk_filename", "size_bytes")
+                                }
 
-                        crimes.extend(rule_crimes)
-                        entry["status"] = "ok"
-                        consecutive_failures = 0
+                            crimes.extend(rule_crimes)
+                            entry["status"] = "ok"
+                            consecutive_failures = 0
 
-                    except (json.JSONDecodeError, OSError) as exc:
-                        entry["status"] = "parse_error"
-                        entry["error"] = str(exc)[:200]
+                        except (json.JSONDecodeError, OSError) as exc:
+                            entry["status"] = "parse_error"
+                            entry["error"] = str(exc)[:200]
+                            stats["failed"] += 1
+                            consecutive_failures += 1
+
+                    elif exit_code != 0:
+                        entry["status"] = "error"
+                        entry["error"] = (stderr or "").strip()[:200]
                         stats["failed"] += 1
                         consecutive_failures += 1
 
-                elif exit_code != 0:
-                    entry["status"] = "error"
-                    entry["error"] = (stderr or "").strip()[:200]
+                    else:
+                        # exit 0, but no output file
+                        entry["status"] = "no_output"
+                        stats["skipped"] += 1
+                        consecutive_failures += 1
+
+                except subprocess.TimeoutExpired:
+                    entry["status"] = "timeout"
+                    entry["duration_sec"] = per_rule_timeout
+                    stats["timed_out"] += 1
+                    stats["failed"] += 1
+                    consecutive_failures += 1
+                    self._emit(f"  Rule {rule_name}: timeout ({per_rule_timeout}s)")
+
+                except Exception as exc:  # pylint: disable=broad-exception-caught
+                    entry["status"] = "exception"
+                    entry["error"] = str(exc)[:200]
                     stats["failed"] += 1
                     consecutive_failures += 1
 
-                else:
-                    # exit 0, but no output file
-                    entry["status"] = "no_output"
-                    stats["skipped"] += 1
-                    consecutive_failures += 1
+                finally:
+                    log_handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                    log_handle.flush()
+                    # Delete tmp output immediately to save disk space.
+                    if rule_output.exists():
+                        try:
+                            rule_output.unlink()
+                        except OSError:
+                            pass
 
-            except subprocess.TimeoutExpired:
-                entry["status"] = "timeout"
-                entry["duration_sec"] = per_rule_timeout
-                stats["timed_out"] += 1
-                stats["failed"] += 1
-                consecutive_failures += 1
-                self._emit(f"  Rule {rule_name}: timeout ({per_rule_timeout}s)")
+                # Early exit on cascading failures.
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    remaining = len(rule_files) - idx - 1
+                    self._emit(
+                        f"Aborting: {MAX_CONSECUTIVE_FAILURES} consecutive failures. "
+                        f"Skipping remaining {remaining} rules."
+                    )
+                    stats["skipped"] += remaining
+                    break
 
-            except Exception as exc:  # pylint: disable=broad-exception-caught
-                entry["status"] = "exception"
-                entry["error"] = str(exc)[:200]
-                stats["failed"] += 1
-                consecutive_failures += 1
-
-            finally:
-                log_handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
-                log_handle.flush()
-                # Delete tmp output immediately to save disk space.
-                if rule_output.exists():
-                    try:
-                        rule_output.unlink()
-                    except OSError:
-                        pass
-
-            # Early exit on cascading failures.
-            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                remaining = len(rule_files) - idx - 1
-                self._emit(
-                    f"Aborting: {MAX_CONSECUTIVE_FAILURES} consecutive failures. "
-                    f"Skipping remaining {remaining} rules."
-                )
-                stats["skipped"] += remaining
-                break
-
-        log_handle.close()
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
         # Count matched entries.
@@ -491,7 +490,7 @@ class QuarkRunner:
 
     @staticmethod
     def _is_matched(crime: dict) -> bool:
-        """A rule is considered matched if confidence >= 60% or score > 0."""
+        """A rule is considered matched if score >= 1.0 (delegates to _quark_is_matched)."""
         return _quark_is_matched(crime)
 
     @staticmethod

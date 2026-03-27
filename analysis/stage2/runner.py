@@ -121,9 +121,10 @@ def _load_manifest_data(project_dir: Path) -> _ManifestData:
                             uri = f"{scheme}://{host}{path}" if host else f"{scheme}://"
                             if uri not in result.deeplinks:
                                 result.deeplinks.append(uri)
-                break
             except Exception:  # pylint: disable=broad-exception-caught
                 continue
+            if result.deeplinks:
+                break
     except Exception:  # pylint: disable=broad-exception-caught
         pass
 
@@ -622,11 +623,12 @@ class Stage2DynamicRunner:
                 except Exception:  # pylint: disable=broad-exception-caught
                     pass
                 _mitm_proc = None
-                try:
-                    from analysis.stage2.mitm import unset_emulator_proxy  # noqa: PLC0415
-                    unset_emulator_proxy(emulator_serial)
-                except Exception:  # pylint: disable=broad-exception-caught
-                    pass
+                if emulator_serial:
+                    try:
+                        from analysis.stage2.mitm import unset_emulator_proxy  # noqa: PLC0415
+                        unset_emulator_proxy(emulator_serial)
+                    except Exception:  # pylint: disable=broad-exception-caught
+                        pass
 
             capture_end_ts = time.monotonic()  # end of capture window (before post-processing)
 
@@ -1208,7 +1210,7 @@ class Stage2DynamicRunner:
 
         # info_app_crashed_during_exercise (NOT suppressed by duration gate)
         if app_crashed:
-            detail = f"Процесс приложения завершился в течение окна захвата."
+            detail = "Процесс приложения завершился в течение окна захвата."
             if crash_time:
                 detail += f" PID исчез в {crash_time}."
             if crash_info.get("snippet"):
@@ -1387,7 +1389,7 @@ class Stage2DynamicRunner:
                 f"Процесс приложения загрузил {len(found)} подозрительных нативных библиотек: {detail_lines}. "
                 "Основание: сообщения линковщика из потока logcat, отфильтрованного по PID."
             ),
-            evidence=pid_logcat_out,
+            evidence=evidence_snippet,
         )]
 
     def _get_package_name(self, apk_path: Path, run_dir: Path, log: Callable) -> str:

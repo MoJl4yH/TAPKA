@@ -342,7 +342,7 @@ def main() -> int:
     # Создаём проект
     _info("Создание проекта…")
     project = None
-    for _attempt in range(3):
+    for _ in range(3):
         try:
             project = storage.create_project(str(apk_path))
             _ok(f"Проект создан: {project.project_id}")

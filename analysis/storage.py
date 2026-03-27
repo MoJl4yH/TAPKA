@@ -50,7 +50,7 @@ class Storage:
         if not apk_path.is_file():
             raise FileNotFoundError(f"APK not found: {apk_file}")
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         sha256 = self.calculate_sha256(apk_path)
         project_id = self.generate_project_id(apk_path.name, sha256, timestamp=timestamp)
         project_dir = self.get_project_dir(project_id)
@@ -134,7 +134,7 @@ class Storage:
         project = self._ensure_project_versions(project, project_dir)
         if any(meta.sha256 == sha256 for meta in project.apk_versions):
             raise ValueError("The selected file is already present in the project.")
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         safe_name = self._sanitize_name(apk_path.name)
         version_id = f"{timestamp}_{safe_name}_{sha256[:8]}"
         version_dir = versions_dir / version_id
@@ -167,12 +167,12 @@ class Storage:
 
     def generate_project_id(self, apk_name: str, sha256: str, timestamp: str | None = None) -> str:
         if timestamp is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         safe_name = self._sanitize_name(apk_name)
         return f"{timestamp}_{safe_name}_{sha256[:12]}"
 
     def generate_run_id(self, stage: str) -> str:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         safe_stage = self._sanitize_name(stage)
         return f"{timestamp}_{safe_stage}"
 

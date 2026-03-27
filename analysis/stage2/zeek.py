@@ -452,7 +452,7 @@ class ZeekAnalyzer:
                 trigger_reason = f"Чувствительный URI: {uri[:100]}"
             elif host:
                 # BUG-28: any external HTTP to non-platform host is noteworthy at C1
-                trigger_reason = f"Незашифрованный HTTP к внешнему хосту"
+                trigger_reason = "Незашифрованный HTTP к внешнему хосту"
                 confidence = "C1"
 
             if trigger_reason:
@@ -526,7 +526,7 @@ class ZeekAnalyzer:
                 "title": "Подозрение на DNS-туннелирование (длинные метки с высокой энтропией)",
                 "detail": (
                     f"Обнаружено {len(long_entropy_hits)} DNS-запросов с метками длиной более 50 символов "
-                    f"и энтропией Шеннона >3.5 бит/символ. "
+                    "и энтропией Шеннона >3.5 бит/символ. "
                     f"Примеры: {', '.join(long_entropy_hits[:3])}"
                 ),
                 "evidence": "tshark_dns_detailed.tsv",

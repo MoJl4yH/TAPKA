@@ -1287,7 +1287,8 @@ class Stage3MobSFRunner:
     def _line_count(self, path: Path) -> int | None:
         if not path.exists():
             return None
-        return sum(1 for _ in path.open("r", encoding="utf-8", errors="replace"))
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            return sum(1 for _ in fh)
 
     def _scan_status_from_logs(self, payload: object) -> str | None:
         if isinstance(payload, str):

@@ -2043,7 +2043,7 @@ class MainWindow(QMainWindow):
         self._update_action_states()
         errors = getattr(result, "errors", [])
         if errors:
-            QMessageBox.warning(self, "Анализ завершён", f"Завершено с ошибками:\n" + "\n".join(errors[:5]))
+            QMessageBox.warning(self, "Анализ завершён", "Завершено с ошибками:\n" + "\n".join(errors[:5]))
 
     def _on_pipeline_failed(self, msg: str) -> None:
         """Вызывается при критической ошибке полного анализа."""

@@ -47,7 +47,7 @@ def run_full_pipeline(
     from analysis.scoring import compute_score
     from analysis.stage1_analysis import Stage1StaticRunner
     from analysis.stage2.runner import Stage2DynamicRunner
-    from analysis.reporting import ReportManager
+    from analysis.reporting import ReportManager, ReportType
 
     cfg = config or PipelineConfig()
     log = on_progress or (lambda m: None)
@@ -123,7 +123,7 @@ def run_full_pipeline(
     # ── Пауза между Stage 2 и Stage 3 ───────────────────────────────────────
     # Даём ОС 15 секунд освободить память после остановки QEMU-эмулятора
     # перед тем как Stage 3 MobSF запустит новый эмулятор.
-    if cfg.run_stage2 and cfg.run_stage3:
+    if cfg.run_stage2 and cfg.run_stage3 and result.stage2_ok:
         log("Pipeline: ожидание освобождения памяти после Stage 2 (15s)...")
         time.sleep(15)
 
@@ -145,9 +145,7 @@ def run_full_pipeline(
 
     # ── Security Score ────────────────────────────────────────────────────────
     try:
-        from analysis.reporting import ReportManager as RM, ReportType
-
-        rm = RM(storage)
+        rm = ReportManager(storage)
         findings_by_stage = rm.load_all_findings(project_id)
         result.security_score = compute_score(findings_by_stage)
         log(f"Security Score: {result.security_score.total:.1f} ({result.security_score.risk_label})")
@@ -156,10 +154,8 @@ def run_full_pipeline(
 
     # ── Save combined report ──────────────────────────────────────────────────
     try:
-        from analysis.reporting import ReportManager as RM2, ReportType as RT2
-
-        rm2 = RM2(storage)
-        combined = rm2.generate_combined_report(project_id, RT2.EXTENDED)
+        rm2 = ReportManager(storage)
+        combined = rm2.generate_combined_report(project_id, ReportType.EXTENDED)
         # BUG-ARCH-09: guard against get_active_version_dir failure
         try:
             version_dir = storage.get_active_version_dir(project_id)

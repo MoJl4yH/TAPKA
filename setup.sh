@@ -17,9 +17,13 @@ step() { echo -e "\n${BOLD}==> $*${RESET}"; }
 # --- Variables ----------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$SCRIPT_DIR/.venv"
-TAPKA_DIR="$SCRIPT_DIR/.tapka"
+TAPKA_DIR="$HOME/.tapka"
 QUARK_RULES_DIR="$TAPKA_DIR/quark-rules"
 QUARK_RULES_REPO="https://github.com/quark-engine/quark-rules"
+SEMGREP_RULES_DIR="$TAPKA_DIR/semgrep-rules/mindedsecurity"
+SEMGREP_RULES_REPO="https://github.com/mindedsecurity/semgrep-rules-android-security.git"
+SEMGREP_REGISTRY_DIR="$TAPKA_DIR/semgrep-rules/registry"
+SEMGREP_REGISTRY_BASE_URL="https://semgrep.dev/c"
 MOBSF_UPSTREAM_IMAGE="opensecurity/mobile-security-framework-mobsf:latest"
 MOBSF_IMAGE="tapka/mobsf:latest"
 PYTHON_MIN="3.11"
@@ -205,6 +209,12 @@ else
     ok "Python dependencies installed."
 fi
 
+# setuptools<72 provides pkg_resources needed by opentelemetry-instrumentation
+# (a transitive semgrep dependency). setuptools>=72 removed pkg_resources.
+info "Pinning setuptools<72 for semgrep compatibility..."
+"$VENV_PIP" install --quiet "setuptools<72"
+ok "setuptools pinned."
+
 # Verify pip-installed CLI tools are available in venv
 VENV_BIN="$VENV_DIR/bin"
 for cli in quark apkid apkleaks; do
@@ -285,21 +295,70 @@ if ! command -v checksec &>/dev/null; then
     fi
 fi
 
-# --- 6c. semgrep custom rules ------------------------------------------------
-step "semgrep custom rules"
-
-SEMGREP_CUSTOM_RULES="$SCRIPT_DIR/analysis/semgrep/rules/android_tapka.yaml"
-if [[ -f "$SEMGREP_CUSTOM_RULES" ]]; then
-    ok "semgrep custom rules: $SEMGREP_CUSTOM_RULES"
-else
-    warn "Custom semgrep rules not found: $SEMGREP_CUSTOM_RULES"
-fi
+# --- 6c. semgrep -----------------------------------------------------------
+step "semgrep"
 
 if [[ -f "$VENV_BIN/semgrep" ]]; then
     SEMGREP_VER=$("$VENV_BIN/semgrep" --version 2>/dev/null | head -1 || echo "unknown")
     ok "semgrep installed: $SEMGREP_VER"
 else
     warn "semgrep not found in venv (pip install semgrep>=1.50.0)"
+fi
+
+# MindedSecurity MSTG rules
+mkdir -p "$TAPKA_DIR/semgrep-rules"
+if [[ -d "$SEMGREP_RULES_DIR/.git" ]]; then
+    info "semgrep-rules/mindedsecurity already cloned; updating..."
+    git -C "$SEMGREP_RULES_DIR" pull --quiet --ff-only origin main 2>/dev/null \
+        || git -C "$SEMGREP_RULES_DIR" pull --quiet --ff-only origin master 2>/dev/null \
+        || warn "Could not update semgrep-rules/mindedsecurity (network issue). Using current copy."
+    ok "semgrep-rules/mindedsecurity updated: $SEMGREP_RULES_DIR"
+elif [[ -d "$SEMGREP_RULES_DIR" && ! -d "$SEMGREP_RULES_DIR/.git" ]]; then
+    warn "$SEMGREP_RULES_DIR exists but is not a git repository. Skipping."
+else
+    info "Cloning semgrep-rules/mindedsecurity..."
+    git clone --quiet --depth=1 "$SEMGREP_RULES_REPO" "$SEMGREP_RULES_DIR" \
+        && ok "semgrep-rules/mindedsecurity cloned: $SEMGREP_RULES_DIR" \
+        || { fail "Failed to clone semgrep-rules/mindedsecurity. Check network connectivity."; MISSING_TOOLS+=("semgrep-rules"); }
+fi
+
+SEMGREP_RULE_COUNT=$(find "$SEMGREP_RULES_DIR/rules" -name "*.yaml" 2>/dev/null | wc -l)
+if [[ "$SEMGREP_RULE_COUNT" -gt 0 ]]; then
+    ok "Found $SEMGREP_RULE_COUNT MindedSecurity semgrep rules in $SEMGREP_RULES_DIR/rules"
+else
+    warn "MindedSecurity semgrep rules not found in $SEMGREP_RULES_DIR/rules"
+fi
+
+# Semgrep registry rules (offline copy)
+mkdir -p "$SEMGREP_REGISTRY_DIR"
+declare -A REGISTRY_RULESETS=(
+    ["java-android-security"]="r/java.android.security"
+    ["java-lang-security-audit"]="r/java.lang.security.audit"
+    ["generic-secrets-gitleaks"]="r/generic.secrets.gitleaks"
+)
+REGISTRY_UPDATED=0
+REGISTRY_FAILED=0
+for name in "${!REGISTRY_RULESETS[@]}"; do
+    ruleset="${REGISTRY_RULESETS[$name]}"
+    dest="$SEMGREP_REGISTRY_DIR/${name}.yaml"
+    if curl -sSf --max-time 30 "$SEMGREP_REGISTRY_BASE_URL/$ruleset" -o "$dest.tmp" 2>/dev/null; then
+        mv "$dest.tmp" "$dest"
+        REGISTRY_UPDATED=$((REGISTRY_UPDATED + 1))
+    else
+        rm -f "$dest.tmp"
+        if [[ -f "$dest" ]]; then
+            warn "Could not update $name (network issue). Using existing copy."
+        else
+            warn "Could not download $name — registry rules will be unavailable offline."
+            REGISTRY_FAILED=$((REGISTRY_FAILED + 1))
+        fi
+    fi
+done
+if [[ "$REGISTRY_UPDATED" -gt 0 ]]; then
+    ok "Semgrep registry rules downloaded/updated: $SEMGREP_REGISTRY_DIR ($REGISTRY_UPDATED rulesets)"
+fi
+if [[ "$REGISTRY_FAILED" -gt 0 ]]; then
+    warn "$REGISTRY_FAILED registry ruleset(s) unavailable — run setup.sh again with network access"
 fi
 
 # --- 7. Docker group (for MobSF) ---------------------------------------------
