@@ -1836,6 +1836,7 @@ class Stage1StaticRunner:
         evidence: str,
         tags: set[str] | None = None,
         sources: list[str] | None = None,
+        confidence: str = "C3",
     ) -> None:
         findings.append(
             self._make_finding(
@@ -1845,7 +1846,7 @@ class Stage1StaticRunner:
                     file_path=str(manifest_path),
                     line=None,
                     column=None,
-                    confidence="C3",
+                    confidence=confidence,
                     evidence_type="manifest",
                     tags=tags or set(),
                     sources=sources or [],
@@ -1999,6 +2000,8 @@ class Stage1StaticRunner:
         if "location" in foreground_types:
             has_background_location = True
 
+        # NOTE: confidence="C2" for all permission-based NDV findings.
+        # Manifest permission ≠ confirmed behaviour — app may declare but not use.
         if has_location:
             if has_background_location:
                 self._add_manifest_finding(
@@ -2009,6 +2012,7 @@ class Stage1StaticRunner:
                     "location permissions (background)",
                     tags={"background"},
                     sources=["manifest:permission:location"],
+                    confidence="C2",
                 )
             else:
                 self._add_manifest_finding(
@@ -2018,6 +2022,7 @@ class Stage1StaticRunner:
                     "ndv_geo_tracking_foreground",
                     "location permissions",
                     sources=["manifest:permission:location"],
+                    confidence="C2",
                 )
 
         if has_permission("android.permission.RECORD_AUDIO"):
@@ -2028,6 +2033,7 @@ class Stage1StaticRunner:
                 "ndv_mic_eavesdropping",
                 "android.permission.RECORD_AUDIO",
                 sources=["manifest:permission:RECORD_AUDIO"],
+                confidence="C2",
             )
         if has_permission("android.permission.CAMERA"):
             tags = {"background"} if "camera" in foreground_types else set()
@@ -2039,6 +2045,7 @@ class Stage1StaticRunner:
                 "android.permission.CAMERA",
                 tags=tags,
                 sources=["manifest:permission:CAMERA"],
+                confidence="C2",
             )
         if has_permission("android.permission.BIND_ACCESSIBILITY_SERVICE"):
             self._add_manifest_finding(
@@ -2049,6 +2056,7 @@ class Stage1StaticRunner:
                 "android.permission.BIND_ACCESSIBILITY_SERVICE",
                 tags={"background"},
                 sources=["manifest:permission:BIND_ACCESSIBILITY_SERVICE"],
+                confidence="C2",
             )
         if has_permission("android.permission.SYSTEM_ALERT_WINDOW"):
             self._add_manifest_finding(
@@ -2058,6 +2066,7 @@ class Stage1StaticRunner:
                 "ndv_overlay_abuse",
                 "android.permission.SYSTEM_ALERT_WINDOW",
                 sources=["manifest:permission:SYSTEM_ALERT_WINDOW"],
+                confidence="C2",
             )
         if has_permission("android.permission.READ_SMS") or has_permission("android.permission.RECEIVE_SMS"):
             self._add_manifest_finding(
@@ -2067,6 +2076,7 @@ class Stage1StaticRunner:
                 "ndv_sms_intercept",
                 "android.permission.READ_SMS/RECEIVE_SMS",
                 sources=["manifest:permission:SMS"],
+                confidence="C2",
             )
         if has_permission("android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"):
             self._add_manifest_finding(
@@ -2076,6 +2086,7 @@ class Stage1StaticRunner:
                 "ndv_notification_listener",
                 "android.permission.BIND_NOTIFICATION_LISTENER_SERVICE",
                 sources=["manifest:permission:BIND_NOTIFICATION_LISTENER_SERVICE"],
+                confidence="C2",
             )
 
         if "mediaProjection" in foreground_types:
@@ -2087,6 +2098,7 @@ class Stage1StaticRunner:
                 "foregroundServiceType=mediaProjection",
                 tags={"background"},
                 sources=["manifest:foregroundServiceType:mediaProjection"],
+                confidence="C2",
             )
 
     def _component_exported(self, component, tag: str, ns: str) -> bool:

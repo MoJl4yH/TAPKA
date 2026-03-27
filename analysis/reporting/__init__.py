@@ -1234,6 +1234,38 @@ class ReportManager:
                 )
             )
 
+        # sec_certificate_pinning — positive security control, not a vulnerability.
+        # Represented as IndicatorV2 so analysts see it as a defensive measure.
+        pinning_findings = [f for f in findings if f.category == "sec_certificate_pinning"]
+        if pinning_findings:
+            first = pinning_findings[0]
+            indicators.append(
+                IndicatorV2(
+                    id=_hash_id("ind", "positive_control", "sec_certificate_pinning"),
+                    type="positive_control",
+                    value="sec_certificate_pinning",
+                    severity_hint="info",
+                    noise=False,
+                    tags=["network", "positive_control"],
+                    sources=[
+                        SourceRefV2(
+                            stage=STAGE_STATIC,
+                            tool="rg",
+                            ref=first.file_path or None,
+                            rule="sec_certificate_pinning",
+                        )
+                    ],
+                    examples=[
+                        IndicatorExampleV2(
+                            file=f.file_path or None,
+                            line=f.line,
+                            snippet=(f.evidence or f.match or None),
+                        )
+                        for f in pinning_findings[:3]
+                    ],
+                )
+            )
+
         return indicators
 
     def _build_stage3_indicators(self, run_dir: Path, stage3_data: dict[str, dict]) -> list[IndicatorV2]:
@@ -1458,6 +1490,10 @@ class ReportManager:
     ) -> list[FindingV2]:
         converted: list[FindingV2] = []
         for finding in findings:
+            # sec_certificate_pinning is a positive control (impact=0), not a vulnerability.
+            # It is represented as IndicatorV2 in _build_stage1_indicators instead.
+            if finding.category == "sec_certificate_pinning":
+                continue
             evidence_value = (finding.evidence or finding.match or "").strip()
             location = finding.location or finding.file_path or ""
             finding_id = _hash_id("fnd", finding.category, evidence_value, location)
